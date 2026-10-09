@@ -1,0 +1,38 @@
+================================================================================
+FILE CONTEXT: app/api/knowledge.py
+================================================================================
+
+PURPOSE:
+Provides REST API endpoints for Knowledge Base (KB) management, document uploads,
+ingestion, and vector search (RAG pipeline backed by Pinecone & embedding models).
+
+KEY MODELS & IMPORTS:
+- `KnowledgeBase`, `KbDocument`, `Provider`, `User` from `app.models.tables`
+- Pinecone vector storage & embedding provider integration
+
+KEY ENDPOINTS:
+1. `POST /`:
+   - Creates a new Knowledge Base.
+   - Generates a Pinecone namespace (`namespace = str(kb.id)`).
+   - Validates that the provider has embedding capabilities.
+2. `GET /`:
+   - Lists all knowledge bases for `current_user`.
+3. `GET /{kb_id}`:
+   - Retrieves details for a specific knowledge base.
+4. `DELETE /{kb_id}`:
+   - Deletes the knowledge base record for `current_user`.
+   - Cleans up and commits to DB.
+5. `POST /{kb_id}/documents`:
+   - Uploads a document (text, markdown, pdf, etc.) to the KB.
+   - Creates a `KbDocument` record with status `pending`.
+6. `GET /{kb_id}/documents`:
+   - Lists all documents within a knowledge base.
+7. `DELETE /{kb_id}/documents/{doc_id}`:
+   - Verifies KB ownership and deletes the specific `KbDocument`.
+8. `POST /{kb_id}/search`:
+   - Performs semantic vector similarity search against the KB's Pinecone namespace.
+   - Returns top-k matching chunks with similarity scores.
+
+RELATION TO OTHER MODULES:
+- Agents can reference multiple knowledge bases via `config["knowledge_base_ids"]`.
+- Knowledge bases link to `Provider` via `provider_id` for embeddings generation.

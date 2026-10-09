@@ -1,0 +1,40 @@
+================================================================================
+FILE CONTEXT: frontend/src/api.js
+================================================================================
+
+PURPOSE:
+Provides central client-side JavaScript functions for communicating with the FastAPI backend.
+Manages JWT authorization header retrieval from `localStorage` (`access_token`).
+
+KEY SECTIONS & METHODS:
+1. `request(path, options)`:
+   - Base wrapper for `fetch(API_BASE + path, ...)`.
+   - Appends `Authorization: Bearer <token>` if `auth: true`.
+   - Parses JSON response or throws `Error(data.detail || response.statusText)`.
+
+2. Authentication:
+   - `login(username, password)`
+   - `register(userData)`
+   - `getCurrentUser()`
+   - `listApiKeys()`, `createApiKey()`, `revokeApiKey()`
+
+3. Providers:
+   - `listConfiguredProviders()` -> `GET /v1/providers/configured`
+   - `saveProvider(provider_id, payload)` -> `POST /v1/providers/${provider_id}`
+   - `deleteProvider(provider_id)` -> `DELETE /v1/providers/${provider_id}`
+   - `fetchProviderModels(provider_id)` -> `GET /v1/providers/${provider_id}/models`
+
+4. Agents:
+   - `listAgents()` -> `GET /v1/agents/`
+   - `createAgent(payload)` -> `POST /v1/agents/`
+   - `deleteAgent(agent_id)` -> `DELETE /v1/agents/${agent_id}`
+
+5. Knowledge Bases:
+   - `listKnowledgeBases()` -> `GET /v1/knowledge-bases/`
+   - `createKnowledgeBase(payload)` -> `POST /v1/knowledge-bases/`
+   - `deleteKnowledgeBase(kb_id)` -> `DELETE /v1/knowledge-bases/${kb_id}`
+
+OBSERVATIONS:
+- `deleteAgent(agent_id)` sends a `DELETE` request to `/v1/agents/${agent_id}`.
+- When `listAgents()` returns agents, each agent object has `id` formatted as a UUID string (from `str(agent.id)`).
+- When `deleteAgent` is called from the UI, it passes `agent.id` directly into the path parameter.

@@ -1,0 +1,36 @@
+================================================================================
+FILE CONTEXT: app/api/providers.py
+================================================================================
+
+PURPOSE:
+Provides REST API endpoints for LLM provider configuration (OpenRouter, NVIDIA NIM).
+Users register their API keys, pick supported/enabled models, and query available models.
+
+KEY ENDPOINTS:
+1. `GET /configured`:
+   - Returns providers currently configured by `current_user` (IDs, names, models, default model).
+2. `POST /{provider_id}`:
+   - Registers or updates a provider API key.
+   - Encrypts the raw key with Fernet (`encrypt_credential(api_key)`).
+   - Validates supported models and defaults.
+3. `GET /{provider_id}/models`:
+   - Decrypts user's API key.
+   - Dispatches remote HTTP call to provider API (OpenRouter or NVIDIA) to fetch dynamic model list.
+4. `DELETE /{provider_id}`:
+   - Checks if provider is valid (`_require_provider(provider_id)`).
+   - Finds provider record owned by `current_user.id`.
+   - Returns 404 if not found.
+   - Executes `await db.delete(provider)` and `await db.commit()`.
+   - Returns `{"message": f"Provider {provider_id} deleted successfully"}`.
+
+WHY DELETE PROVIDER FAILED & HOW IT WAS FIXED:
+- Previously, `DELETE /{provider_id}` called `await db.delete(provider)` without deleting dependent
+  `Agent` or `KnowledgeBase` records referencing `provider.id`.
+- If any agent or knowledge base had been configured using this provider, PostgreSQL threw a
+  ForeignKeyViolationError (IntegrityError) via asyncpg, producing a 500 Internal Server Error.
+- FIXED: `delete_provider` now cascades:
+  1. Deletes all associated agents (along with their runs, artifacts, and sessions).
+  2. Deletes all associated knowledge bases (along with their documents).
+  3. Deletes the provider record cleanly.
+- In `app/models/tables.py`, `ondelete="CASCADE"` has also been added to `Agent.provider_id`
+  and `KnowledgeBase.provider_id`.

@@ -1,0 +1,67 @@
+================================================================================
+INVESTIGATION NOTE: delete_agent 500 Error vs delete_provider
+================================================================================
+
+PROBLEM STATEMENT:
+- Deleting a provider (`DELETE /v1/providers/{provider_id}`) works properly.
+- Deleting an agent (`DELETE /v1/agents/{agent_id}`) fails with HTTP 500 Internal Server Error.
+
+ROOT CAUSE ANALYSIS & FINDINGS:
+
+1. FOREIGN KEY CONSTRAINTS (MOST LIKELY CAUSE OF 500 IN PRODUCTION):
+   - In `app/models/tables.py`:
+     - `AgentSession` (sessions table):
+       `agent_id: UUID = Field(foreign_key="agents.id", index=True)`
+     - `Run` (runs table):
+       `agent_id: UUID = Field(foreign_key="agents.id", index=True)`
+     - Neither foreign key has `ondelete="CASCADE"`.
+   - When an agent is deleted in `app/api/agents.py`:
+     ```python
+     await db.delete(agent)
+     await db.commit()
+     ```
+   - If ANY sessions or runs have been created for this agent (e.g. from testing
+     or chatting with the agent in the playground), PostgreSQL rejects the DELETE
+     due to ForeignKeyViolationError (IntegrityError).
+   - Because FastAPI does not catch unhandled database `IntegrityError` exceptions
+     in `delete_agent`, it crashes with HTTP 500.
+
+2. CONTRAST WITH delete_provider:
+   - Providers are only referenced by `Agent.provider_id` and `KnowledgeBase.provider_id`.
+   - If a provider has no agents or KBs attached (or if test keys are added and deleted),
+     no foreign key violations occur.
+   - However, once an agent is created and tested, child records (`runs` / `sessions`)
+     are immediately created for that agent.
+
+3. FASTAPI DEPENDENCY ANNOTATION IN `app/api/agents.py`:
+   - Notice:
+     ```python
+     async def delete_agent(
+         agent_id: str,
+         current_user: User = Depends(current_user),
+         db: Depends(get_db) = Depends(get_db)
+     ):
+     ```
+   - In some FastAPI / Pydantic versions, typing `db: Depends(get_db)` instead of
+     `db: AsyncSession = Depends(get_db)` can create parameter resolution oddities,
+     though `current_user: User = Depends(current_user)` is also shadowing the function name.
+   - However, `db` still works for `db.exec(select(Agent)...)` which succeeds in finding the agent.
+     The crash happens during `await db.delete(agent)` and `await db.commit()`.
+
+4. FRONTEND-BACKEND PATH & PAYLOAD FORMAT:
+   - Frontend calls:
+     `DELETE /v1/agents/${agent_id}`
+   - Backend endpoint:
+     `@router.delete("/{agent_id}", response_model=dict)`
+   - Backend expects `agent_id: str` as path param and parses via `uuid.UUID(agent_id)`.
+   - The path formatting between frontend and backend is consistent; the error is internal (500)
+     rather than 404 or 400.
+
+RECOMMENDED FIXES & APPLIED RESOLUTION:
+1. In `app/api/agents.py`:
+   - Updated `delete_agent` to explicitly cascade delete child `Artifact`s, `Run`s,
+     and `AgentSession`s before deleting the `Agent` record.
+   - This ensures safe deletion regardless of database migration state.
+2. In `app/models/tables.py`:
+   - Added `ondelete="CASCADE"` to `AgentSession.agent_id`, `Run.agent_id`, and `Artifact.run_id`.
+   - Set `session_id` on `Run` to `ondelete="SET NULL"`.

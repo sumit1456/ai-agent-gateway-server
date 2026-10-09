@@ -1,0 +1,48 @@
+================================================================================
+FILE CONTEXT: app/api/agents.py
+================================================================================
+
+PURPOSE:
+Provides REST API endpoints for agent management (CRUD operations on Agent model).
+All endpoints are scoped to the authenticated user (`current_user`).
+
+KEY IMPORTS & DEPENDENCIES:
+- FastAPI APIRouter, Depends, HTTPException, status
+- SQLModel / SQLAlchemy `select`
+- `app.security.current_user` (authenticates bearer JWT / user)
+- `app.db.get_db` (async database session generator)
+- `app.models.tables.User, Agent, Provider`
+- `app.models.agent_config.AgentConfig`
+
+ENDPOINTS IN FILE:
+1. Helper `_resolve_provider(db, user_id, provider_ref)`:
+   - Resolves provider either by UUID or provider string name (e.g. 'nvidia', 'openrouter').
+2. `POST /`:
+   - Validates `AgentConfig`.
+   - Resolves provider for the authenticated user.
+   - Creates new `Agent` record and persists JSON config.
+   - Returns created agent info (id, name, provider_id, config, created_at).
+3. `GET /`:
+   - Queries all agents owned by `current_user.id`.
+   - Returns list of agent dictionaries.
+4. `GET /{agent_id}`:
+   - Validates `agent_id` as UUID (returns 400 if invalid).
+   - Queries agent matching both `user_id == current_user.id` and `id == agent_uuid`.
+   - Returns 404 if not found.
+5. `PUT /{agent_id}`:
+   - Updates existing agent's name, provider_id, and config.
+   - Returns 404 if agent not found or 400 if provider/UUID invalid.
+6. `DELETE /{agent_id}`:
+   - Parses `agent_id` into UUID.
+   - Finds agent matching `user_id` and `agent_uuid`.
+   - Runs `await db.delete(agent)` and `await db.commit()`.
+   - Returns success message.
+
+CRITICAL OBSERVATIONS / FINDINGS:
+- Notice dependency annotation:
+  `db: Depends(get_db) = Depends(get_db)`
+  (FastAPI interprets the default value `Depends(get_db)` correctly, but typical type hint would be `AsyncSession`).
+- In `delete_agent`, there is no cascading delete logic in code.
+  If an agent has associated child rows in `sessions` (AgentSession) or `runs` (Run),
+  calling `await db.delete(agent)` violates the foreign key constraint on PostgreSQL,
+  resulting in an unhandled DB exception and HTTP 500.

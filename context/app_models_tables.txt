@@ -1,0 +1,90 @@
+================================================================================
+FILE CONTEXT: app/models/tables.py
+================================================================================
+
+PURPOSE:
+Defines the SQLModel table schema definitions for PostgreSQL.
+
+TABLES & SCHEMA DEFINITIONS:
+1. `User` (table: "users"):
+   - id: UUID (PK)
+   - email: str (unique, indexed)
+   - username: str (unique, indexed)
+   - name: str
+   - organization: str | None
+   - password_hash: str
+   - created_at: datetime (tz-aware)
+
+2. `ApiKey` (table: "api_keys"):
+   - id: UUID (PK)
+   - user_id: UUID -> foreign_key="users.id"
+   - key_hash: str (unique, indexed)
+   - prefix: str (first 8 chars)
+
+3. `Provider` (table: "providers"):
+   - id: UUID (PK)
+   - user_id: UUID -> foreign_key="users.id"
+   - provider: str ("openrouter" | "nvidia")
+   - api_key_enc: str (encrypted API key via Fernet)
+   - enabled_models: list[str] | None (JSONB)
+   - default_model: str | None
+
+4. `Agent` (table: "agents"):
+   - id: UUID (PK)
+   - user_id: UUID -> foreign_key="users.id"
+   - name: str
+   - provider_id: UUID -> foreign_key="providers.id"
+   - config: dict (JSONB, validated AgentConfig JSON)
+   - created_at: datetime
+   - updated_at: datetime
+
+5. `Tool` (table: "tools"):
+   - id: UUID (PK)
+   - user_id: UUID -> foreign_key="users.id"
+   - name: str
+   - description: str
+   - kind: str ("webhook" | "client")
+   - endpoint_url: str | None
+   - auth_enc: str | None
+   - input_schema: dict (JSONB)
+   - timeout_ms: int
+
+6. `KnowledgeBase` (table: "knowledge_bases"):
+   - id: UUID (PK)
+   - user_id: UUID -> foreign_key="users.id"
+   - name: str
+   - provider_id: UUID -> foreign_key="providers.id"
+   - namespace: str (Pinecone namespace = str(id))
+   - embedding_model: str
+   - vector_api_key_enc: str | None
+   - vector_index_host: str | None
+   - rerank_model: str | None
+
+7. `KbDocument` (table: "kb_documents"):
+   - id: UUID (PK)
+   - kb_id: UUID -> foreign_key="knowledge_bases.id"
+   - filename, status, error, chunk_count
+
+8. `AgentSession` (table: "sessions"):
+   - id: UUID (PK)
+   - agent_id: UUID -> foreign_key="agents.id"  <-- Points to Agent
+   - facts: dict (JSONB)
+
+9. `Run` (table: "runs"):
+   - id: UUID (PK)
+   - agent_id: UUID -> foreign_key="agents.id"  <-- Points to Agent
+   - user_id: UUID -> foreign_key="users.id"
+   - session_id: UUID | None -> foreign_key="sessions.id"
+   - status, input, variables, result, state, stop_reason, tokens_used, duration_ms
+
+10. `Artifact` (table: "artifacts"):
+    - id: UUID (PK)
+    - run_id: UUID -> foreign_key="runs.id"
+    - local_id, kind, summary, content
+
+FOREIGN KEY & CASCADE IMPLICATIONS:
+- `AgentSession.agent_id` has `foreign_key="agents.id"` WITHOUT `ondelete="CASCADE"`.
+- `Run.agent_id` has `foreign_key="agents.id"` WITHOUT `ondelete="CASCADE"`.
+- In standard SQL / SQLAlchemy / PostgreSQL, deleting an `Agent` row while references exist
+  in `sessions` or `runs` raises an IntegrityError / ForeignKeyViolationError unless
+  dependent records are deleted first or foreign key has CASCADE enabled.

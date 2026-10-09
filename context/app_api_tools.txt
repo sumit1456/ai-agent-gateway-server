@@ -1,0 +1,24 @@
+================================================================================
+FILE CONTEXT: app/api/tools.py
+================================================================================
+
+PURPOSE:
+Provides REST API endpoints for user-defined custom tools (webhooks or client tools).
+
+KEY ENDPOINTS:
+1. `POST /`:
+   - Registers a new tool (name, description, kind: "webhook" | "client", endpoint_url, auth_token, input_schema, timeout_ms).
+   - Validates uniqueness of tool name per user.
+2. `GET /`:
+   - Lists all registered tools for the authenticated user.
+3. `GET /{tool_id}`:
+   - Gets a single tool by UUID.
+4. `PUT /{tool_id}`:
+   - Updates tool details and schemas.
+5. `DELETE /{tool_id}`:
+   - Deletes tool by UUID for authenticated user.
+   - Deletes from DB and commits.
+
+RELEVANCE TO AGENTS:
+Agents can declare tools in their configuration JSON (`config["tools"]`).
+Unlike foreign keys, agent tools are stored inside `agent.config` JSONB, not as an explicit DB foreign key table.

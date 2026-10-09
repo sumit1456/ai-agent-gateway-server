@@ -1,0 +1,44 @@
+================================================================================
+FILE CONTEXT: frontend/src/pages/Dashboard.jsx
+================================================================================
+
+PURPOSE:
+Primary React frontend dashboard component for user management, provider configuration,
+agent creation/management, knowledge bases, and API keys.
+
+KEY COMPONENTS & TABS:
+1. `Dashboard`:
+   - Top-level shell with tab navigation: Providers, Agents, Knowledge Bases, API Keys, Settings.
+2. `ProvidersTab` & `ProviderModal`:
+   - Lists configured vs available providers.
+   - Deletes provider via `deleteProvider(provider.provider_id)`.
+   - Uses `provider_id` string like "nvidia" or "openrouter".
+3. `AgentsTab`:
+   - Loads agents via `listAgents()`.
+   - Deletion handler:
+     ```javascript
+     async function handleDelete(id) {
+       if (!window.confirm('Delete this agent?')) return;
+       try {
+         await deleteAgent(id);
+         flash('Agent deleted.');
+         load();
+       } catch (err) {
+         flash(err.message, 'error');
+       }
+     }
+     ```
+   - Invocation in agent card/table:
+     ```javascript
+     <button ... onClick={() => handleDelete(agent.id)}>Delete</button>
+     ```
+4. `KnowledgeBasesTab`:
+   - Manages vector indexes / Pinecone collections and documents.
+
+OBSERVATIONS & RECENT UPDATES:
+- `handleDelete` in AgentsTab invokes `deleteAgent(agent.id)` where `agent.id` is the string UUID.
+- `ProviderModal` contains explicit cascade deletion protections:
+  - Red warning banner alerting the user that deleting a provider will permanently remove all
+    dependent Agents, Sessions, Runs, Artifacts, and Knowledge Bases.
+  - Multi-line `window.confirm` dialog confirming the cascading deletion.
+  - Updated flash message notifying the user once provider and dependents are removed.
