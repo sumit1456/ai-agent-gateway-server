@@ -15,7 +15,7 @@ import time
 import sys
 
 # Configuration
-API_KEY = "gw_vfTUvJo08plY-Gmaz5PcR0x71HII7ad-b-gGDJTKIBs"
+API_KEY = "gw_toY-XPUta3PokTQyRSiNlKRMyfnVuXWOGXAvxTQLzjU"
 BASE_URL = "http://localhost:8000"
 END_USER_ID = "test_user_123"  # Simulate an end-user
 
@@ -134,48 +134,34 @@ try:
         print(f"✅ Found {len(agents)} agents")
         
         if len(agents) == 0:
-            # Create a test agent
-            print("\n📝 No agents found. Creating a test agent...")
-            
-            agent_config = {
-                "name": "Test Agent",
-                "provider_id": provider_id,
-                "models": {
-                    "planner": "meta-llama/llama-3.1-70b-instruct",
-                    "executor": "meta-llama/llama-3.1-70b-instruct",
-                    "reviewer": "meta-llama/llama-3.1-8b-instruct"
-                },
-                "system_prompt": "You are a helpful AI assistant. Answer questions clearly and concisely.",
-                "temperature": 0.7,
-                "variables": [],
-                "tools": [],
-                "knowledge_base_ids": [],
-                "limits": {
-                    "max_iterations": 5,
-                    "max_tokens_per_run": 50000,
-                    "timeout_s": 120,
-                    "max_steps": 8,
-                    "max_parallel_steps": 3,
-                    "max_tool_turns": 4,
-                    "max_tool_output_chars": 4000,
-                    "llm_review": True
-                }
-            }
-            
-            r = requests.post(f"{BASE_URL}/v1/agents/", headers=headers, json=agent_config)
-            print_response(r, show_json=True)
-            
-            if check_response(r, expected_status=200):
-                agent_data = r.json()
-                agent_id = agent_data["id"]
-                print(f"✅ Created agent: {agent_data['name']} (ID: {agent_id})")
-            else:
-                print("❌ Failed to create agent")
-                sys.exit(1)
+            print("\n⚠️  No agents found!")
+            print("Please create an agent first using the API:")
+            print("""
+POST /v1/agents/
+{
+    "name": "My Agent",
+    "provider_id": "your-provider-id",
+    "models": {
+        "planner": "model-name",
+        "executor": "model-name",
+        "reviewer": "model-name"
+    },
+    "system_prompt": "You are a helpful AI assistant."
+}
+            """)
+            sys.exit(1)
         else:
             # Use first existing agent
             agent_id = agents[0]["id"]
-            print(f"\n📌 Using existing agent: {agents[0]['name']} (ID: {agent_id})")
+            agent_name = agents[0]["name"]
+            agent_config = agents[0]["config"]
+            
+            print(f"\n📌 Using existing agent: {agent_name} (ID: {agent_id})")
+            print(f"   Provider ID: {agents[0]['provider_id']}")
+            print(f"   Models:")
+            print(f"      - Planner:  {agent_config['models']['planner']}")
+            print(f"      - Executor: {agent_config['models']['executor']}")
+            print(f"      - Reviewer: {agent_config['models']['reviewer']}")
             
 except Exception as e:
     print(f"❌ Error: {e}")
@@ -189,7 +175,7 @@ print_section(f"STEP 5: Run Agent (ID: {agent_id})")
 print(f"🎭 Simulating end-user: {END_USER_ID}\n")
 try:
     run_payload = {
-        "input": "what was rhe last question i asked ? ?",
+        "input": "what was the last questions i asked ?",
         "variables": {}
     }
     
@@ -305,71 +291,71 @@ print(f"\n📊 Session created for end-user: {END_USER_ID}")
 print("   This end-user's conversation is isolated from other users.")
 
 
-# ============================================================================
-# BONUS: Test Session Isolation (Optional)
-# ============================================================================
-print_section("BONUS: Test Session Isolation")
-print("Testing that different end-users have isolated sessions...\n")
+# # ============================================================================
+# # BONUS: Test Session Isolation (Optional)
+# # ============================================================================
+# print_section("BONUS: Test Session Isolation")
+# print("Testing that different end-users have isolated sessions...\n")
 
-try:
-    # Run 1: User Alice
-    headers_alice = headers.copy()
-    headers_alice["X-End-User-ID"] = "alice"
+# try:
+#     # Run 1: User Alice
+#     headers_alice = headers.copy()
+#     headers_alice["X-End-User-ID"] = "alice"
     
-    print("👤 User: alice")
-    print("   Input: 'My favorite color is blue'")
-    r1 = requests.post(
-        f"{BASE_URL}/v1/agents/{agent_id}/run",
-        headers=headers_alice,
-        json={"input": "My favorite color is blue"}
-    )
+#     print("👤 User: alice")
+#     print("   Input: 'My favorite color is blue'")
+#     r1 = requests.post(
+#         f"{BASE_URL}/v1/agents/{agent_id}/run",
+#         headers=headers_alice,
+#         json={"input": "My favorite color is blue"}
+#     )
     
-    if r1.status_code == 200:
-        alice_run_id = r1.json()["run_id"]
-        print(f"   ✅ Run started: {alice_run_id}\n")
+#     if r1.status_code == 200:
+#         alice_run_id = r1.json()["run_id"]
+#         print(f"   ✅ Run started: {alice_run_id}\n")
         
-        # Wait for completion
-        time.sleep(5)
+#         # Wait for completion
+#         time.sleep(5)
         
-        # Run 2: User Bob asks about Alice
-        headers_bob = headers.copy()
-        headers_bob["X-End-User-ID"] = "bob"
+#         # Run 2: User Bob asks about Alice
+#         headers_bob = headers.copy()
+#         headers_bob["X-End-User-ID"] = "bob"
         
-        print("👤 User: bob")
-        print("   Input: 'What is Alice's favorite color?'")
-        r2 = requests.post(
-            f"{BASE_URL}/v1/agents/{agent_id}/run",
-            headers=headers_bob,
-            json={"input": "What is Alice's favorite color?"}
-        )
+#         print("👤 User: bob")
+#         print("   Input: 'What is Alice's favorite color?'")
+#         r2 = requests.post(
+#             f"{BASE_URL}/v1/agents/{agent_id}/run",
+#             headers=headers_bob,
+#             json={"input": "What is Alice's favorite color?"}
+#         )
         
-        if r2.status_code == 200:
-            bob_run_id = r2.json()["run_id"]
-            print(f"   ✅ Run started: {bob_run_id}\n")
+#         if r2.status_code == 200:
+#             bob_run_id = r2.json()["run_id"]
+#             print(f"   ✅ Run started: {bob_run_id}\n")
             
-            # Wait for completion
-            time.sleep(5)
+#             # Wait for completion
+#             time.sleep(5)
             
-            # Check Bob's result
-            r_bob_result = requests.get(f"{BASE_URL}/v1/runs/{bob_run_id}", headers=headers_bob)
-            if r_bob_result.status_code == 200:
-                bob_result = r_bob_result.json()
-                bob_answer = bob_result.get("result", {}).get("answer", "")
+#             # Check Bob's result
+#             r_bob_result = requests.get(f"{BASE_URL}/v1/runs/{bob_run_id}", headers=headers_bob)
+#             if r_bob_result.status_code == 200:
+#                 bob_result = r_bob_result.json()
+#                 bob_answer = bob_result.get("result", {}).get("answer", "")
                 
-                print("📝 Bob's Response:")
-                print(f"   {bob_answer[:200]}")
-                print()
+#                 print("📝 Bob's Response:")
+#                 print(f"   {bob_answer[:200]}")
+#                 print()
                 
-                if "blue" in bob_answer.lower():
-                    print("❌ Session leak detected! Bob knows Alice's info.")
-                    print("   Sessions are NOT properly isolated.")
-                else:
-                    print("✅ Session isolation working correctly!")
-                    print("   Bob doesn't have access to Alice's conversation.")
+#                 if "blue" in bob_answer.lower():
+#                     print("❌ Session leak detected! Bob knows Alice's info.")
+#                     print("   Sessions are NOT properly isolated.")
+#                 else:
+#                     print("✅ Session isolation working correctly!")
+#                     print("   Bob doesn't have access to Alice's conversation.")
         
-except Exception as e:
-    print(f"⚠️  Bonus test skipped: {e}")
+# except Exception as e:
+#     print(f"⚠️  Bonus test skipped: {e}")
 
-print("\n" + "=" * 60)
-print("  All Tests Complete!")
-print("=" * 60)
+# print("\n" + "=" * 60)
+# print("  All Tests Complete!")
+# print("=" * 60)

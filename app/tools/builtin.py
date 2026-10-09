@@ -64,7 +64,7 @@ class ReadArtifactTool(BaseTool):
     def input_schema(self) -> type[BaseModel]:
         return ReadArtifactInput
 
-    async def _execute(self, artifact_id: str) -> ToolResult:
+    async def _execute(self, artifact_id: str, **kwargs) -> ToolResult:
         item = self._ctx.artifacts.get(artifact_id)
         if item is None:
             return ToolResult(ok=False, error=f"Artifact '{artifact_id}' not found. "
@@ -98,7 +98,7 @@ class ListArtifactsTool(BaseTool):
             "Use read_artifact(id) to fetch the full content."
         )
 
-    async def _execute(self) -> ToolResult:
+    async def _execute(self, **kwargs) -> ToolResult:
         meta = self._ctx.artifacts.meta()
         if not meta:
             return ToolResult(ok=True, output="No artifacts yet.")
@@ -133,7 +133,7 @@ class KBSearchTool(BaseTool):
     def input_schema(self) -> type[BaseModel]:
         return KBSearchInput
 
-    async def _execute(self, query: str, top_k: int = 5) -> ToolResult:
+    async def _execute(self, query: str, top_k: int = 5, **kwargs) -> ToolResult:
         if not self._ctx.retriever or not self._ctx.kb_namespaces:
             return ToolResult(ok=False, error="No knowledge base is attached to this agent.")
         try:
@@ -180,7 +180,7 @@ class RememberFactTool(BaseTool):
     def input_schema(self) -> type[BaseModel]:
         return RememberFactInput
 
-    async def _execute(self, fact: str) -> ToolResult:
+    async def _execute(self, fact: str, **kwargs) -> ToolResult:
         fact = fact.strip()
         if not fact:
             return ToolResult(ok=False, error="Fact cannot be empty.")
@@ -214,7 +214,7 @@ class GetSessionMemoryTool(BaseTool):
             "Returns a list of short fact strings."
         )
 
-    async def _execute(self) -> ToolResult:
+    async def _execute(self, **kwargs) -> ToolResult:
         try:
             from app.db import SessionLocal
             from app.models.tables import AgentSession
@@ -262,7 +262,7 @@ class StoreKVTool(BaseTool):
     def input_schema(self) -> type[BaseModel]:
         return StoreKVInput
 
-    async def _execute(self, key: str, value: object) -> ToolResult:
+    async def _execute(self, key: str, value: object, **kwargs) -> ToolResult:
         key = key.strip()
         if not key:
             return ToolResult(ok=False, error="Key cannot be empty.")
@@ -333,7 +333,7 @@ class GetKVTool(BaseTool):
     def input_schema(self) -> type[BaseModel]:
         return GetKVInput
 
-    async def _execute(self, key: str) -> ToolResult:
+    async def _execute(self, key: str, **kwargs) -> ToolResult:
         key = key.strip()
         try:
             from app.db import SessionLocal
@@ -389,7 +389,7 @@ class GetConversationHistoryTool(BaseTool):
         return GetConversationHistoryInput
 
     async def _execute(self, last_n: int = 10, from_date: Optional[str] = None, 
-                      to_date: Optional[str] = None, role: Optional[str] = None) -> ToolResult:
+                      to_date: Optional[str] = None, role: Optional[str] = None, **kwargs) -> ToolResult:
         try:
             from app.db import SessionLocal
             from app.models.tables import AgentSession

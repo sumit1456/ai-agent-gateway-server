@@ -1,6 +1,6 @@
 from __future__ import annotations
-from typing import Literal, TypedDict
-from pydantic import BaseModel
+from typing import Literal, Any, TypedDict
+from pydantic import BaseModel, Field
 
 # What kind of content an artifact holds.
 # step_output  – default; raw executor output passed between steps
@@ -19,35 +19,57 @@ class StopRun(Exception):
         super().__init__(reason)
         self.reason = reason
 
-class Step(TypedDict, total=False):
+# Pydantic model for validation
+class StepModel(BaseModel):
+    """Pydantic model for Step validation and serialization."""
     id: str
     goal: str
-    tools: list[str]            # tool names this step may use
-    inputs: list[str]           # ids of EARLIER STEPS whose output this step needs
-    kb_queries: list[str]       # retrieval queries to run before the step
-    depends_on: list[str]       # step ids that must be "done" first (superset of inputs)
+    tools: list[str] = Field(default_factory=list)
+    inputs: list[str] = Field(default_factory=list)
+    kb_queries: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
+    success_criteria: str = ""
+    status: Literal["pending", "running", "done", "failed"] = "pending"
+    attempts: int = 0
+    result_summary: str | None = None
+    artifact_id: str | None = None
+    problems: list[str] = Field(default_factory=list)
+    
+    class Config:
+        extra = "forbid"
+
+# TypedDict for state (used by LangGraph)
+class Step(TypedDict, total=False):
+    """Step as used in LangGraph state (dict-based)."""
+    id: str
+    goal: str
+    tools: list[str]
+    inputs: list[str]
+    kb_queries: list[str]
+    depends_on: list[str]
     success_criteria: str
-    status: str                 # pending | running | done | failed
-    attempts: int               # number of RETRIES so far (0 = first attempt)
+    status: str  # "pending" | "running" | "done" | "failed"
+    attempts: int
     result_summary: str | None
-    artifact_id: str | None     # artifact holding the step's full output
+    artifact_id: str | None
     problems: list[str]
 
 class RunState(TypedDict, total=False):
+    """Represents the complete state of an agent run (dict-based for LangGraph)."""
     run_id: str
     input: str
-    variables: dict
-    mode: str                   # "direct" | "plan"
+    variables: dict[str, Any]
+    mode: str  # "direct" | "plan"
     goal: str
     steps: list[Step]
-    facts: list[str]            # short, deduped, durable findings (<= 20)
-    artifacts: dict[str, dict]  # id -> {kind, summary, size}   (handles only)
-    dead_ends: list[str]        # notes on approaches that failed (fed to the planner)
-    iteration: int              # reviewer passes so far
-    last_wave: list[str]        # step ids executed in the latest executor pass
+    facts: list[str]
+    artifacts: dict[str, dict]
+    dead_ends: list[str]
+    iteration: int
+    last_wave: list[str]
     pending_replan: bool
     replan_reason: str
-    plan_hashes: list[str]      # to detect an identical replan (no progress)
+    plan_hashes: list[str]
     stop_reason: str | None
     answer: str
 

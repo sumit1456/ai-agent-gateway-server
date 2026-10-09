@@ -183,14 +183,13 @@ async def planner_node(state: RunState, config: RunnableConfig) -> dict:
         trace.log_routing_decision("PLANNER", "DIRECT", f"Validation error: {exc}")
         return {"mode": "direct", "planner_error": str(exc)}
     
-    # Initialize new steps as pending
+    # Initialize new steps as pending (already done in validate_plan)
     for s in new_steps:
-        s["status"] = "pending"
         trace.log_custom(f"New step: {s['id']} - {s['goal'][:60]}")
     
     result = {
         "steps": state.get("steps", []) + new_steps,
-        "plan_hashes": state.get("plan_hashes", []) + [plan_hash([s.dict() for s in new_steps])],
+        "plan_hashes": state.get("plan_hashes", []) + [plan_hash(new_steps)],
     }
     
     trace.log_node_exit("PLANNER", {"new_steps": len(new_steps), "total_steps": len(result["steps"])})

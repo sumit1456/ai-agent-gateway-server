@@ -1,4 +1,4 @@
-from app.engine.types import Plan, Step, StepResult
+from app.engine.types import Plan, Step, StepModel, StepResult
 from app.engine.views import clip
 
 class PlanError(Exception):
@@ -7,11 +7,13 @@ class PlanError(Exception):
 def validate_plan(plan: Plan, allowed_tools: set[str], used_ids: set[str],
                   done_ids: set[str], max_steps: int) -> list[Step]:
     """
-    Turn an LLM Plan into validated Steps.
+    Turn an LLM Plan into validated Steps (as dicts).
     - new step ids must be unique and must not reuse any id in `used_ids`
     - depends_on / inputs may only reference new ids or `done_ids`
     - unknown tool names are dropped; inputs are merged into depends_on
     - dependency cycles are rejected
+    
+    Returns list of Step dicts (not Pydantic models) for LangGraph state.
     """
     raw = plan.steps[:max_steps]
     if not raw:
@@ -27,15 +29,26 @@ def validate_plan(plan: Plan, allowed_tools: set[str], used_ids: set[str],
     for s in raw:
         inputs = [i for i in dict.fromkeys(s.inputs) if i in known and i != s.id]
         deps = [d for d in dict.fromkeys(s.depends_on + inputs) if d in known and d != s.id]
-        steps.append(Step(
-            id=s.id, goal=s.goal, tools=[t for t in s.tools if t in allowed_tools],
-            inputs=inputs, kb_queries=s.kb_queries[:3], depends_on=deps,
-            success_criteria=s.success_criteria, status="pending", attempts=0,
-            result_summary=None, artifact_id=None, problems=[]))
-    _check_acyclic(steps, set(new_ids))
+        # Use Pydantic for validation, then convert to dict
+        step_model = StepModel(
+            id=s.id, 
+            goal=s.goal, 
+            tools=[t for t in s.tools if t in allowed_tools],
+            inputs=inputs, 
+            kb_queries=s.kb_queries[:3], 
+            depends_on=deps,
+            success_criteria=s.success_criteria, 
+            status="pending", 
+            attempts=0,
+            result_summary=None, 
+            artifact_id=None, 
+            problems=[])
+        steps.append(step_model.model_dump())
+    _check_acyclic_dict(steps, set(new_ids))
     return steps
 
-def _check_acyclic(steps: list[Step], new_ids: set[str]) -> None:
+def _check_acyclic_dict(steps: list[Step], new_ids: set[str]) -> None:
+    """Check for dependency cycles in dict-based steps."""
     deps = {s["id"]: {d for d in s["depends_on"] if d in new_ids} for s in steps}
     while deps:
         free = [k for k, v in deps.items() if not v]
@@ -81,4 +94,4 @@ def fallback_answer(state) -> str:
     head = "The request could not be fully completed" + (f" ({reason})." if reason != "done" else ".")
     if not done:
         return head
-    return head + "\nCompleted so far:\n" + "\n".join(f"- {s['goal']}: {s.get('result_summary')}" for s in done)
+    return head + "\nCompleted so far:\n" + "\n".join(f"- {s['goal']}: {s.get('result_summary', '')}" for s in done)
