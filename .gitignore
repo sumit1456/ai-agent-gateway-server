@@ -59,6 +59,12 @@ agent_traces/
 # Frontend artifacts (if any node modules in backend directory)
 node_modules/
 package-lock.json
+package.json
+src/
+
+# Temporary / test files
+test.txt
+*.tmp
 
 # IDEs and editors
 .vscode/
