@@ -40,6 +40,11 @@ class GetConversationHistoryInput(BaseModel):
     role: Optional[str] = Field(default=None, description="Filter by role: 'user' or 'assistant'")
 
 
+class SearchConversationMemoryInput(BaseModel):
+    query: str = Field(..., min_length=1, description="What detail to find in older messages from this session")
+    top_k: int = Field(default=3, ge=1, le=5, description="Maximum relevant messages to return")
+
+
 # ---------------------------------------------------------------------------
 # read_artifact
 # ---------------------------------------------------------------------------
@@ -392,7 +397,7 @@ class GetConversationHistoryTool(BaseTool):
                       to_date: Optional[str] = None, role: Optional[str] = None, **kwargs) -> ToolResult:
         try:
             from app.db import SessionLocal
-            from app.models.tables import AgentSession
+            from app.models.tables import AgentSession, ConversationMessage
             from sqlmodel import select
             from uuid import UUID
             from datetime import datetime, timezone
@@ -405,11 +410,20 @@ class GetConversationHistoryTool(BaseTool):
             async with SessionLocal() as db:
                 res = await db.exec(select(AgentSession).where(AgentSession.id == UUID(str(session_id))))
                 session = res.first()
+                message_res = await db.exec(
+                    select(ConversationMessage)
+                    .where(ConversationMessage.session_id == UUID(str(session_id)))
+                    .order_by(ConversationMessage.created_at, ConversationMessage.id)
+                )
+                message_rows = message_res.all()
             
             if not session:
                 return ToolResult(ok=True, output="Session not found.")
             
-            history = session.conversation_history or []
+            history = [
+                {"role": msg.role, "content": msg.content, "timestamp": msg.created_at.isoformat()}
+                for msg in message_rows
+            ]
             if not history:
                 return ToolResult(ok=True, output="No conversation history yet.")
             
@@ -468,6 +482,64 @@ class GetConversationHistoryTool(BaseTool):
             return ToolResult(ok=False, error=f"Could not retrieve conversation history: {exc}")
 
 
+class SearchConversationMemoryTool(BaseTool):
+    """Semantically search older messages, restricted to this exact agent session."""
+
+    def __init__(self, ctx: "RunContext"):
+        self._ctx = ctx
+
+    @property
+    def name(self) -> str:
+        return "search_conversation_memory"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search older messages in the current conversation by meaning. "
+            "Use when the recent conversation and session summary do not contain a needed detail. "
+            "Results are isolated to this exact session and include timestamps."
+        )
+
+    @property
+    def input_schema(self) -> type[BaseModel]:
+        return SearchConversationMemoryInput
+
+    async def _execute(self, query: str, top_k: int = 3, **kwargs) -> ToolResult:
+        namespace = getattr(self._ctx, "conversation_namespace", None)
+        session_id = getattr(self._ctx, "session_id", None)
+        retriever = getattr(self._ctx, "retriever", None)
+        if not namespace or not session_id or not retriever:
+            return ToolResult(ok=True, output="Semantic conversation memory is not configured for this session.")
+        try:
+            chunks = await retriever.search(
+                namespaces=[namespace],
+                query=query,
+                top_k=top_k,
+                final_k=top_k,
+                metadata_filter={
+                    "$and": [
+                        {"record_type": {"$eq": "conversation_message"}},
+                        {"session_id": {"$eq": str(session_id)}},
+                        {"user_id": {"$eq": str(getattr(self._ctx, "user_id", ""))}},
+                        {"agent_id": {"$eq": str(getattr(self._ctx, "agent_id", ""))}},
+                    ]
+                },
+            )
+            if not chunks:
+                return ToolResult(ok=True, output="No relevant older messages found.")
+            lines = []
+            for chunk in chunks:
+                metadata = chunk.get("metadata", {})
+                lines.append(
+                    f"[{metadata.get('timestamp', 'unknown time')}] "
+                    f"[{metadata.get('role', 'unknown').upper()}] {chunk.get('text', '')}"
+                )
+            return ToolResult(ok=True, output="\n\n".join(lines))
+        except Exception as exc:
+            log.error("search_conversation_memory failed: %s", exc)
+            return ToolResult(ok=False, error=f"Conversation memory search failed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Factory — build all builtin tools for a run
 # ---------------------------------------------------------------------------
@@ -482,6 +554,8 @@ def build_builtin_tools(ctx: "RunContext") -> list[BaseTool]:
         GetKVTool(ctx),
         GetConversationHistoryTool(ctx),
     ]
+    if ctx.retriever and getattr(ctx, "conversation_namespace", None) and getattr(ctx, "session_id", None):
+        tools.append(SearchConversationMemoryTool(ctx))
     if ctx.retriever and ctx.kb_namespaces:
         tools.append(KBSearchTool(ctx))
     return tools

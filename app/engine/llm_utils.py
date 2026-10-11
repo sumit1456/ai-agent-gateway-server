@@ -114,7 +114,10 @@ async def llm_turn(ctx, role: str, messages: list, tools: list | None = None,
             full = chunk if full is None else full + chunk
             if stream_answer and isinstance(chunk.content, str) and chunk.content:
                 emitted = True
-                await ctx.sink.emit("answer.delta", {"text": chunk.content})
+                delta = {"text": chunk.content}
+                await ctx.sink.emit("answer.delta", delta)
+                from app.engine.runner import _publish_run_event
+                await _publish_run_event(ctx.run_id, "answer.delta", delta)
         
         log.info(f"📦 [LLM_TURN/{role.upper()}] Received {chunk_count} chunks")
         
@@ -129,6 +132,8 @@ async def llm_turn(ctx, role: str, messages: list, tools: list | None = None,
         trace.log_error(f"Retry #{n}: {exc}")
         if emitted:
             await ctx.sink.emit("answer.reset", {})
+            from app.engine.runner import _publish_run_event
+            await _publish_run_event(ctx.run_id, "answer.reset", {})
             emitted = False
 
     msg = await retry_async(call, on_retry=on_retry)
@@ -146,5 +151,7 @@ async def llm_turn(ctx, role: str, messages: list, tools: list | None = None,
     if stream_answer and emitted and has_tool_calls:
         log.info(f"🔄 [LLM_TURN/{role.upper()}] Resetting answer due to tool calls")
         await ctx.sink.emit("answer.reset", {})
+        from app.engine.runner import _publish_run_event
+        await _publish_run_event(ctx.run_id, "answer.reset", {})
     
     return msg

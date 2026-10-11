@@ -8,7 +8,7 @@ from app.engine.state_ops import (PlanError, apply_result, fallback_answer, read
                                   validate_plan)
 from app.engine.tool_loop import run_step, run_tool_loop
 from app.engine.types import Plan, ReviewResult, RouteDecision, RunState, StepResult, StepVerdict, StopRun
-from app.engine.views import build_view, clip, assemble
+from app.engine.views import build_view, clip, assemble, conversation_context
 from app.engine.trace_logger import get_trace_logger
 
 log = logging.getLogger(__name__)
@@ -47,6 +47,8 @@ async def router_node(state: RunState, config: RunnableConfig) -> dict:
     log.info(f"📝 [ROUTER] Input: {state['goal'][:100]}...")
     
     await ctx.sink.emit("run.started", {"run_id": ctx.run_id})
+    from app.engine.runner import _publish_run_event
+    await _publish_run_event(ctx.run_id, "node_enter", {"node": "router", "status": "Routing request"})
     visible = [n for n in ctx.tools.names() if n != "read_artifact"]
     
     log.info(f"🔧 [ROUTER] Available tools: {visible}")
@@ -68,7 +70,12 @@ async def router_node(state: RunState, config: RunnableConfig) -> dict:
         log.info(f"🤖 [ROUTER] Calling LLM to decide routing...")
         
         system = get_prompt(ctx.config, "router")
-        user = f"GOAL: {state['goal']}\n\nAVAILABLE TOOLS: {', '.join(visible) if visible else '(none)'}\n\nKNOWLEDGE BASE: {'available' if ctx.kb_namespaces else 'not available'}"
+        user = assemble([
+            ("GOAL", state["goal"]),
+            ("AVAILABLE TOOLS", ", ".join(visible) if visible else "(none)"),
+            ("KNOWLEDGE BASE", "available" if ctx.kb_namespaces else "not available"),
+            ("SESSION CONTEXT", conversation_context(ctx)),
+        ], 5000)
         
         # Log the full conversation
         from langchain_core.messages import SystemMessage, HumanMessage
@@ -86,6 +93,7 @@ async def router_node(state: RunState, config: RunnableConfig) -> dict:
     
     result = {"mode": mode}
     trace.log_node_exit("ROUTER", result)
+    await _publish_run_event(ctx.run_id, "node_complete", {"node": "router", "status": mode})
     trace.log_routing_decision("ROUTER", mode.upper(), f"Selected mode: {mode}")
     
     _log_timing("ROUTER", start_time, ctx, {"mode": mode, "tools_count": len(visible)})
@@ -98,6 +106,8 @@ async def direct_node(state: RunState, config: RunnableConfig) -> dict:
     
     trace = get_trace_logger(ctx.run_id)
     trace.log_node_enter("DIRECT", state)
+    from app.engine.runner import _publish_run_event
+    await _publish_run_event(ctx.run_id, "node_enter", {"node": "direct", "status": "Processing request"})
     
     log.info(f"💬 [DIRECT] Starting direct answer mode")
     log.info(f"📝 [DIRECT] Goal: {state['goal'][:100]}...")
@@ -105,7 +115,10 @@ async def direct_node(state: RunState, config: RunnableConfig) -> dict:
     
     direct_prompt = get_prompt(ctx.config, "direct")
     system = f"{ctx.persona}\n\n{direct_prompt}"
-    user = state["goal"]
+    user = assemble([
+        ("CURRENT USER MESSAGE", state["goal"]),
+        ("SESSION CONTEXT", conversation_context(ctx)),
+    ], 13000)
     # Combine tool names with kb_search if knowledge base is available
     available_tools = list(ctx.tools.names())
     if ctx.kb_namespaces:
@@ -123,6 +136,7 @@ async def direct_node(state: RunState, config: RunnableConfig) -> dict:
     trace.log_custom(f"Tool loop completed: {tool_loop_duration}ms, answer length: {len(text or '')}, errors: {errors}")
     
     await ctx.sink.emit("answer.done", {"text": text or ""})
+    await _publish_run_event(ctx.run_id, "node_complete", {"node": "direct", "status": "done"})
     
     result = {
         "status": "done",
@@ -149,20 +163,15 @@ async def planner_node(state: RunState, config: RunnableConfig) -> dict:
     
     trace = get_trace_logger(ctx.run_id)
     trace.log_node_enter("PLANNER", state)
+    from app.engine.runner import _publish_run_event
+    await _publish_run_event(ctx.run_id, "node_enter", {"node": "planner", "status": "Creating execution plan"})
     
     log.info(f"📋 [PLANNER] Creating execution plan...")
     trace.log_custom(f"Existing steps: {len(state.get('steps', []))}")
     trace.log_custom(f"Replan reason: {state.get('replan_reason', 'N/A')}")
     
     system = get_prompt(ctx.config, "planner", max_steps=ctx.config.limits.max_steps)
-    user = f"GOAL: {state['goal']}\n\n"
-    user += f"VARIABLES: {state.get('variables', {})}\n\n"
-    user += f"AVAILABLE TOOLS: {', '.join(ctx.tools.names())}\n\n"
-    user += f"KNOWLEDGE BASE: {'available (use kb_queries)' if ctx.kb_namespaces else 'not available'}\n\n"
-    user += f"PROGRESS SO FAR: {_progress(state)}\n\n"
-    user += f"REPLAN REASON: {state.get('replan_reason', '')}\n\n"
-    user += f"DEAD ENDS (do not repeat): {chr(10).join(f'- {d}' for d in state.get('dead_ends', []))}\n\n"
-    user += f"FACTS: {chr(10).join(f'- {f}' for f in state.get('facts', []))}"
+    user = build_view("planner", state, ctx)
     
     from langchain_core.messages import SystemMessage, HumanMessage
     messages = [SystemMessage(content=system), HumanMessage(content=user)]
@@ -191,6 +200,11 @@ async def planner_node(state: RunState, config: RunnableConfig) -> dict:
         "steps": state.get("steps", []) + new_steps,
         "plan_hashes": state.get("plan_hashes", []) + [plan_hash(new_steps)],
     }
+    await _publish_run_event(ctx.run_id, "plan_created", {
+        "steps": [{"id": step["id"], "tool": step.get("tools", []),
+                   "description": step.get("goal", "")} for step in new_steps]
+    })
+    await _publish_run_event(ctx.run_id, "node_complete", {"node": "planner", "status": "done"})
     
     trace.log_node_exit("PLANNER", {"new_steps": len(new_steps), "total_steps": len(result["steps"])})
     trace.log_routing_decision("PLANNER", "EXECUTOR", f"Added {len(new_steps)} steps")
@@ -206,6 +220,8 @@ async def executor_node(state: RunState, config: RunnableConfig) -> dict:
     
     trace = get_trace_logger(ctx.run_id)
     trace.log_node_enter("EXECUTOR", state)
+    from app.engine.runner import _publish_run_event
+    await _publish_run_event(ctx.run_id, "node_enter", {"node": "executor", "status": "Executing steps"})
     
     log.info(f"⚙️  [EXECUTOR] Checking steps...")
     
@@ -238,6 +254,10 @@ async def executor_node(state: RunState, config: RunnableConfig) -> dict:
     
     for step in to_run:
         trace.log_step_execution(step['id'], step['goal'], "starting")
+        await _publish_run_event(ctx.run_id, "step_start", {
+            "step_id": step["id"], "tool": step.get("tools", []),
+            "description": step.get("goal", ""),
+        })
     
     # Run each step
     step_results = await asyncio.gather(*[run_step(ctx, state, s) for s in to_run])
@@ -248,6 +268,9 @@ async def executor_node(state: RunState, config: RunnableConfig) -> dict:
         apply_result(local_state, ctx, step["id"], res)
         log.info(f"✅ [EXECUTOR] Step {step['id']}: {res.status}")
         trace.log_step_execution(step['id'], step['goal'], res.status)
+        await _publish_run_event(ctx.run_id, "node_complete", {
+            "node": "executor", "step_id": step["id"], "status": res.status,
+        })
     
     # Determine if we need to replan
     done_count = sum(1 for s in local_state["steps"] if s["status"] == "done")
@@ -321,7 +344,10 @@ async def reviewer_node(state: RunState, config: RunnableConfig) -> dict:
             f"[{s['id']}] goal: {s['goal']}\nsuccess criteria: {s.get('success_criteria', '')}\n"
             f"status: {s['status']}\nsummary: {s.get('result_summary')}\n"
             f"output: {clip(art['content'], 1500) if art else ''}\nproblems: {s.get('problems', [])}")
-    user = f"OVERALL GOAL: {state['goal']}\n\nSTEPS TO REVIEW:\n\n" + "\n\n".join(blocks)
+    user = assemble([
+        ("OVERALL GOAL", state["goal"]),
+        ("STEPS TO REVIEW", "\n\n".join(blocks)),
+    ], 5000)
     
     from langchain_core.messages import SystemMessage, HumanMessage
     messages = [SystemMessage(content=system), HumanMessage(content=user)]
@@ -417,7 +443,7 @@ async def finalize_node(state: RunState, config: RunnableConfig) -> dict:
     from langchain_core.messages import SystemMessage, HumanMessage
     messages = [SystemMessage(content=system), HumanMessage(content=user)]
     
-    answer = await llm.llm_turn(ctx, "finalizer", messages)
+    answer = await llm.llm_turn(ctx, "finalizer", messages, stream_answer=True)
     
     trace.log_llm_messages("finalizer", messages, answer)
     

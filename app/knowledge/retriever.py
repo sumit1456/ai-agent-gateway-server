@@ -1,6 +1,6 @@
 import asyncio
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.knowledge.embedder import Embedder
 from app.config import settings
 import logging
@@ -12,6 +12,7 @@ class Chunk(BaseModel):
     text: str
     score: float
     source: str = "unknown"
+    metadata: dict = Field(default_factory=dict)
 
 class KnowledgeRetriever:
     def __init__(self, api_key: Optional[str] = None, index_host: Optional[str] = None, rerank_model: Optional[str] = None):
@@ -32,7 +33,8 @@ class KnowledgeRetriever:
                 log.warning(f"Could not connect to Pinecone index: {e}")
         return self._index
 
-    async def search(self, namespaces: List[str], query: str, top_k: int = 20, final_k: int = 5) -> List[dict]:
+    async def search(self, namespaces: List[str], query: str, top_k: int = 20,
+                     final_k: int = 5, metadata_filter: dict | None = None) -> List[dict]:
         """Search the knowledge base for relevant documents across namespaces with reranking."""
         index = self._get_index()
         if not index:
@@ -44,7 +46,8 @@ class KnowledgeRetriever:
 
             async def query_ns(ns: str):
                 res = await asyncio.to_thread(
-                    index.query, vector=qvec, top_k=top_k, namespace=ns, include_metadata=True
+                    index.query, vector=qvec, top_k=top_k, namespace=ns,
+                    include_metadata=True, filter=metadata_filter
                 )
                 return getattr(res, "matches", []) or []
 
@@ -58,7 +61,8 @@ class KnowledgeRetriever:
                     id=str(getattr(m, "id", "")),
                     text=(getattr(m, "metadata", {}) or {}).get("text", ""),
                     score=float(getattr(m, "score", 0.0)),
-                    source=(getattr(m, "metadata", {}) or {}).get("source", "unknown")
+                    source=(getattr(m, "metadata", {}) or {}).get("source", "unknown"),
+                    metadata=getattr(m, "metadata", {}) or {},
                 )
                 for m in matches
             ]
@@ -101,6 +105,8 @@ class KnowledgeRetriever:
                         "text": d.get("text", ""),
                         "source": d.get("source", "unknown"),
                         "doc_id": d.get("doc_id", ""),
+                        **{key: value for key, value in d.get("metadata", {}).items()
+                           if value is not None},
                     }
                 }
                 for i, d in enumerate(documents)

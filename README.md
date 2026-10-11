@@ -21,6 +21,18 @@ This project implements a gateway service that allows developers to register, co
 - **RESTful API**: Full API for managing agents, providers, tools, knowledge bases, and runs
 - **Real-time Responses**: Server-Sent Events (SSE) for streaming agent responses
 
+### Run progress streaming
+
+Configure Redis to enable authenticated SSE progress events. Polling remains available when Redis is not configured.
+
+```env
+REDIS_URL=redis://localhost:6379
+REDIS_SSL=false
+REDIS_PASSWORD=
+```
+
+For TLS Redis services, set `REDIS_URL` to an `rediss://` URL and `REDIS_SSL=true`. Subscribe to `GET /v1/runs/{run_id}/stream` with the same bearer token used for other run endpoints. The stream emits a sanitized `progress_snapshot`, plan/task lifecycle events, `answer.delta` text chunks, `answer.reset` when an in-progress draft must be discarded (for example, after a tool call), and terminal `run_completed` or `run_failed` events. It does not stream private model reasoning, prompts, or raw tool output. Without reachable Redis, this endpoint returns `503`; use `GET /v1/runs/{run_id}` for polling.
+
 ## Architecture
 
 The implementation follows the exact file structure and component organization specified in the architecture document:

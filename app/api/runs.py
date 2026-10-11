@@ -1,14 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Body, Header
+from fastapi.responses import StreamingResponse
 from sqlmodel import select
 from pydantic import BaseModel, Field
 from app.security import current_user
 from app.db import get_db
-from app.models.tables import User, Run, Agent, AgentSession
+from app.models.tables import User, Run, Agent, AgentSession, ConversationMessage
 from app.models.agent_config import AgentConfig
 from app.engine.runner import execute_run
 from typing import List, Optional
 import uuid
 import asyncio
+import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -17,6 +22,10 @@ class RunRequest(BaseModel):
     """Request model for creating a run."""
     input: str = Field(..., min_length=1, max_length=10000, description="The input text for the agent")
     variables: Optional[dict] = Field(default=None, description="Optional variables to pass to the agent")
+    external_session_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=255,
+        description="Caller-owned conversation ID. Reuse it to continue the same agent session.",
+    )
 
 
 @router.get("/builtin-tools", response_model=dict)
@@ -84,6 +93,13 @@ async def list_builtin_tools():
             "always_available": True
         },
         {
+            "name": "search_conversation_memory",
+            "description": "Semantically search older timestamped messages in the current session.",
+            "category": "memory",
+            "always_available": False,
+            "requires": "Pinecone configured through an attached knowledge base"
+        },
+        {
             "name": "kb_search",
             "description": "Search the knowledge base(s) attached to this agent for relevant information.",
             "category": "knowledge",
@@ -105,28 +121,41 @@ async def create_run(
     payload: RunRequest,
     current_user: User = Depends(current_user),
     db: Depends(get_db) = Depends(get_db),
-    x_end_user_id: Optional[str] = Header(None, alias="X-End-User-ID")  # NEW: Header support
+    x_end_user_id: Optional[str] = Header(None, alias="X-End-User-ID"),
+    x_session_id: Optional[str] = Header(None, alias="X-Session-ID"),
 ):
     """
     Create a new run for an agent.
     
     Returns immediately with run_id and status='running'.
-    Poll GET /v1/runs/{run_id} to check status and get results.
+    Poll GET /v1/runs/{run_id} to check status, or stream updates from
+    GET /v1/runs/{run_id}/stream when Redis is configured.
     
     Recommended polling interval: 1-2 seconds
     
     Headers (optional):
         X-End-User-ID: Identifier for your end-user (for multi-tenant tracking)
+        X-Session-ID: Caller-owned conversation ID; reuse it to continue that session
     
     Request Body:
     {
         "input": "Your question or task here",
-        "variables": {"key": "value"}  // optional
+        "variables": {"key": "value"},  // optional
+        "external_session_id": "conversation-123"  // optional; also accepted as X-Session-ID
     }
     """
     input = payload.input
     variables = payload.variables
     end_user_id = x_end_user_id  # Use header value
+    body_session_id = payload.external_session_id.strip() if payload.external_session_id else None
+    header_session_id = x_session_id.strip() if x_session_id else None
+    if body_session_id and header_session_id and body_session_id != header_session_id:
+        raise HTTPException(status_code=400, detail="external_session_id and X-Session-ID must match")
+    external_session_id = body_session_id or header_session_id
+    if external_session_id == "":
+        raise HTTPException(status_code=400, detail="Session ID cannot be empty")
+    if external_session_id and len(external_session_id) > 255:
+        raise HTTPException(status_code=400, detail="Session ID cannot exceed 255 characters")
     # Validate input
     if not input or not input.strip():
         raise HTTPException(
@@ -175,15 +204,14 @@ async def create_run(
             detail="Agent not found"
         )
     
-    # Get or create a session for this agent and end-user
-    # If end_user_id is not provided, use "default" for backward compatibility
+    # Get or create a session scoped to this owned agent, end-user, and caller session.
     effective_end_user_id = end_user_id or "default"
     
     result = await db.exec(
         select(AgentSession).where(
             AgentSession.agent_id == agent.id,
             AgentSession.end_user_id == effective_end_user_id,
-            AgentSession.external_session_id == None  # For now, we don't use external session IDs
+            AgentSession.external_session_id == external_session_id,
         )
     )
     session = result.first()
@@ -192,7 +220,7 @@ async def create_run(
             agent_id=agent.id,
             user_id=current_user.id,
             end_user_id=effective_end_user_id,
-            external_session_id=None,
+            external_session_id=external_session_id,
             facts={}
         )
         db.add(session)
@@ -201,7 +229,7 @@ async def create_run(
     
     # Generate a run ID
     run_id = str(uuid.uuid4())
-    
+
     # Start the run in the background
     # Note: In a real implementation, we would properly handle the agent config
     # For now, we'll use a simplified config
@@ -235,19 +263,7 @@ async def create_run(
         }
     }
     
-    # Execute the run in the background
-    asyncio.create_task(execute_run(
-        run_id=run_id,
-        user_id=str(current_user.id),
-        config_dict=config_dict,
-        input_str=input,
-        variables=variables or {},
-        agent_id=str(agent.id),
-        session_id=str(session.id),
-        end_user_id=effective_end_user_id  # Pass end_user_id to runner
-    ))
-    
-    # Create initial run record in database
+    # Persist the run and incoming message before starting background work.
     run_record = Run(
         id=uuid.UUID(run_id),
         agent_id=agent.id,
@@ -259,12 +275,32 @@ async def create_run(
         status="running"
     )
     db.add(run_record)
+    # Materialize the FK target before inserting the conversation row that points to it.
+    await db.flush()
+    db.add(ConversationMessage(
+        session_id=session.id,
+        run_id=uuid.UUID(run_id),
+        role="user",
+        content=input,
+    ))
     await db.commit()
+
+    asyncio.create_task(execute_run(
+        run_id=run_id,
+        user_id=str(current_user.id),
+        config_dict=config_dict,
+        input_str=input,
+        variables=variables or {},
+        agent_id=str(agent.id),
+        session_id=str(session.id),
+        end_user_id=effective_end_user_id
+    ))
     
     return {
         "run_id": run_id,
+        "session_id": str(session.id),
         "status": "running",
-        "message": "Run started successfully. Poll GET /v1/runs/{run_id} for status."
+        "message": "Run started successfully. Poll GET /v1/runs/{run_id} or stream GET /v1/runs/{run_id}/stream for updates."
     }
 
 @router.get("/runs/{run_id}", response_model=dict)
@@ -422,5 +458,137 @@ async def cancel_run(
         "message": "Run cancelled successfully"
     }
 
-# SSE streaming will be implemented when Redis pub/sub is added
-# For now, use polling: GET /v1/runs/{run_id}
+@router.get("/runs/{run_id}/stream")
+async def stream_run_updates(
+    run_id: str,
+    current_user: User = Depends(current_user),
+    db=Depends(get_db),
+):
+    """Stream authenticated run progress as Server-Sent Events."""
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid run ID format")
+
+    result = await db.exec(select(Run).where(
+        Run.user_id == current_user.id,
+        Run.id == run_uuid,
+    ))
+    run = result.first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    from app.redis_client import get_redis
+    redis_client = await get_redis()
+    if not redis_client:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SSE streaming is unavailable because Redis is not configured or reachable. Use GET /v1/runs/{run_id} instead.",
+        )
+
+    channel = f"run:{run_id}"
+    pubsub = redis_client.pubsub()
+    try:
+        # Subscribe before taking the final status snapshot. This closes the
+        # gap where a short run could finish between checking its status and
+        # attaching to Redis Pub/Sub.
+        await pubsub.subscribe(channel)
+        result = await db.exec(select(Run).where(
+            Run.user_id == current_user.id,
+            Run.id == run_uuid,
+        ))
+        run = result.first()
+        if not run:
+            await pubsub.aclose()
+            raise HTTPException(status_code=404, detail="Run not found")
+        run_status = run.status
+        run_result = run.result
+        stop_reason = run.stop_reason
+        run_state = run.state if isinstance(run.state, dict) else {}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await pubsub.aclose()
+        logger.warning("Could not subscribe to %s: %s", channel, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SSE streaming is temporarily unavailable. Use the polling endpoint instead.",
+        ) from exc
+
+    async def event_generator():
+        try:
+            logger.info("SSE client subscribed to %s", channel)
+            yield f"event: connected\ndata: {json.dumps({'run_id': run_id, 'status': run_status})}\n\n"
+
+            steps = run_state.get("steps", [])
+            progress_snapshot = {
+                'status': run_status,
+                'mode': run_state.get('mode'),
+                'steps': [
+                    {
+                        'id': step.get('id'),
+                        'description': str(step.get('goal', ''))[:1000],
+                        'status': step.get('status', 'pending'),
+                        'summary': str(step.get('result_summary') or '')[:500],
+                    }
+                    for step in steps if isinstance(step, dict)
+                ],
+            }
+            yield f"event: progress_snapshot\ndata: {json.dumps(progress_snapshot)}\n\n"
+
+            if run_status in {"done", "failed", "cancelled"}:
+                event_type = "run_completed" if run_status == "done" else "run_failed"
+                yield f"event: {event_type}\ndata: {json.dumps({'status': run_status, 'result': run_result, 'stop_reason': stop_reason}, default=str)}\n\n"
+                return
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 300
+            while loop.time() < deadline:
+                try:
+                    message = await asyncio.wait_for(
+                        pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0),
+                        timeout=2.0,
+                    )
+                    if not message or message.get("type") != "message":
+                        yield ": keepalive\n\n"
+                        continue
+
+                    try:
+                        event = json.loads(message["data"])
+                    except (TypeError, json.JSONDecodeError):
+                        logger.warning("Ignoring malformed Redis event on %s", channel)
+                        continue
+                    event_type = event.get("type", "update")
+                    payload = event.get("data", {})
+                    yield f"event: {event_type}\ndata: {json.dumps(payload, default=str)}\n\n"
+                    if event_type in {"run_completed", "run_failed"}:
+                        break
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+            else:
+                yield f"event: timeout\ndata: {json.dumps({'message': 'Stream timeout after 5 minutes'})}\n\n"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("SSE stream failed for %s", channel)
+            yield f"event: error\ndata: {json.dumps({'error': 'Stream error'})}\n\n"
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+            except Exception:
+                logger.debug("Failed to unsubscribe from %s", channel, exc_info=True)
+            try:
+                await pubsub.aclose()
+            except Exception:
+                logger.debug("Failed to close pubsub for %s", channel, exc_info=True)
+            logger.info("SSE client disconnected from %s", channel)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

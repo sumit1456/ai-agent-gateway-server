@@ -9,6 +9,7 @@ from app.api import auth, providers, agents, tools, knowledge, runs
 from app.config import settings
 from app.db import init_db
 from app.logging_config import setup_logging, get_logger
+from app.redis_client import close_redis, get_redis
 
 # Configure logging with UTF-8 encoding for Windows compatibility
 setup_logging()
@@ -56,9 +57,34 @@ app.include_router(runs.router, prefix="/v1", tags=["runs"])
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database on startup."""
-    await init_db()
+    """Initialize and verify required and optional service connections."""
+    logger.info("Checking PostgreSQL connection and initializing schema...")
+    try:
+        # init_db opens a real database connection and applies the schema setup.
+        await init_db()
+    except Exception:
+        logger.exception("PostgreSQL startup check failed; application startup aborted")
+        raise
+    logger.info("PostgreSQL connection successful; database schema is ready")
+
+    if not settings.redis_url:
+        logger.info("Redis is not configured (REDIS_URL is empty); live SSE streaming is disabled")
+    else:
+        logger.info("Checking Redis connection...")
+        redis_client = await get_redis()
+        if redis_client:
+            logger.info("Redis startup check successful; live SSE streaming is enabled")
+        else:
+            # Redis is optional: the API can still serve requests and clients can poll runs.
+            logger.warning("Redis startup check failed; continuing without live SSE streaming")
+
     logger.info("AI Agent Gateway started successfully")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close shared Redis resources on shutdown."""
+    await close_redis()
+    logger.info("AI Agent Gateway shutdown complete")
 
 @app.get("/")
 async def root():

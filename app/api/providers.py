@@ -295,6 +295,12 @@ async def delete_provider(
         )
     )
     for kb in kbs_result.all():
+        from app.knowledge.retriever import KnowledgeRetriever
+        retriever = KnowledgeRetriever(
+            api_key=decrypt(kb.vector_api_key_enc) if kb.vector_api_key_enc else None,
+            index_host=kb.vector_index_host,
+        )
+        await retriever.delete_collection(kb.namespace)
         docs_result = await db.exec(
             select(KbDocument).where(KbDocument.kb_id == kb.id)
         )

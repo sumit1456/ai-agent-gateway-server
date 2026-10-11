@@ -122,6 +122,14 @@ class RunContext:
     tools: "ToolRegistry"
     retriever: "KnowledgeRetriever | None" = None
     kb_namespaces: list[str] = field(default_factory=list)
+    conversation_summary: str = ""
+    recent_messages: list[dict] = field(default_factory=list)
+    session_task_state: dict = field(default_factory=dict)
+    session_id: str | None = None
+    agent_id: str | None = None
+    end_user_id: str | None = None
+    conversation_namespace: str | None = None
+    retrieved_memories: list[dict] = field(default_factory=list)
     sink: EventSink = field(default_factory=EventSink)
     usage: Usage = field(default_factory=Usage)
     artifacts: ArtifactStore = field(default_factory=ArtifactStore)

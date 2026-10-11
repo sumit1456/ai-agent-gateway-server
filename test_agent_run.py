@@ -13,11 +13,13 @@ import requests
 import json
 import time
 import sys
+import os
 
 # Configuration
 API_KEY = "gw_toY-XPUta3PokTQyRSiNlKRMyfnVuXWOGXAvxTQLzjU"
 BASE_URL = "http://localhost:8000"
 END_USER_ID = "test_user_123"  # Simulate an end-user
+USE_SSE = os.getenv("USE_SSE", "false").lower() in {"1", "true", "yes"}
 
 headers = {
     "Authorization": f"Bearer {API_KEY}",
@@ -211,12 +213,40 @@ except Exception as e:
 # STEP 6: Poll for Results
 # ============================================================================
 print_section(f"STEP 6: Poll for Results (Run ID: {run_id})")
-print("Polling every 2 seconds (max 60 seconds)...\n")
+run_finished = False
+if USE_SSE:
+    print("Attempting SSE updates (set USE_SSE=false to skip)...\n")
+    event_type = "message"
+    try:
+        with requests.get(
+            f"{BASE_URL}/v1/runs/{run_id}/stream",
+            headers=headers,
+            stream=True,
+            timeout=(10, 310),
+        ) as stream:
+            if stream.status_code == 200:
+                for raw_line in stream.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    if raw_line.startswith("event:"):
+                        event_type = raw_line.split(":", 1)[1].strip()
+                    elif raw_line.startswith("data:"):
+                        print(f"[{event_type}] {raw_line.split(':', 1)[1].strip()}")
+                        if event_type in {"run_completed", "run_failed"}:
+                            run_finished = True
+                            break
+            else:
+                print(f"SSE unavailable ({stream.status_code}); falling back to polling.")
+    except requests.RequestException as e:
+        print(f"SSE request failed ({e}); falling back to polling.")
+
+if not run_finished:
+    print("Polling every 2 seconds (max 60 seconds)...\n")
 
 max_polls = 30
 poll_interval = 2
 
-for i in range(max_polls):
+for i in range(0 if run_finished else max_polls):
     try:
         time.sleep(poll_interval)
         
@@ -277,9 +307,10 @@ for i in range(max_polls):
         print(f"❌ Error during polling: {e}")
         break
 else:
-    print("\n⏱️  Timeout: Run did not complete within 60 seconds")
-    print("The run may still be processing. Check manually with:")
-    print(f"GET /v1/runs/{run_id}")
+    if not run_finished:
+        print("\n⏱️  Timeout: Run did not complete within 60 seconds")
+        print("The run may still be processing. Check manually with:")
+        print(f"GET /v1/runs/{run_id}")
 
 
 # ============================================================================

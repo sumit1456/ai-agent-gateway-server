@@ -2,7 +2,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import select
-from app.security import current_user, encrypt
+from app.security import current_user, decrypt, encrypt
 from app.db import get_db
 from app.models.tables import User, KnowledgeBase, KbDocument, Provider
 from app.knowledge.ingest import ingest_document
@@ -18,6 +18,16 @@ class KnowledgeBaseCreate(BaseModel):
     vector_api_key: Optional[str] = None  # User's Pinecone API key (BYOD)
     vector_index_host: Optional[str] = None # User's Pinecone Index Host URL
     rerank_model: Optional[str] = "bge-reranker-v2-m3"
+
+
+class KnowledgeBaseUpdate(BaseModel):
+    name: Optional[str] = None
+    provider_id: Optional[str] = None
+    embedding_model: Optional[str] = None
+    vector_api_key: Optional[str] = None
+    vector_index_host: Optional[str] = None
+    rerank_model: Optional[str] = None
+    clear_custom_vector_db: bool = False
 
 async def _resolve_provider(db, user_id, provider_ref: str) -> Provider | None:
     try:
@@ -59,6 +69,11 @@ async def create_knowledge_base(
     # Optional Pinecone credentials validation if provided
     vector_api_key_enc = None
     vector_index_host = None
+    if bool(payload.vector_api_key) != bool(payload.vector_index_host):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Both Vector API Key and Index Host are required for BYOD vector database."
+        )
     if payload.vector_api_key and payload.vector_index_host:
         key_str = payload.vector_api_key.strip()
         host_str = payload.vector_index_host.strip()
@@ -173,6 +188,105 @@ async def get_knowledge_base(
         "created_at": kb.created_at.isoformat()
     }
 
+
+@router.put("/{kb_id}", response_model=dict)
+async def update_knowledge_base(
+    kb_id: str,
+    payload: KnowledgeBaseUpdate,
+    current_user: User = Depends(current_user),
+    db: Depends(get_db) = Depends(get_db)
+):
+    """Update a knowledge base's configuration without exposing stored secrets."""
+    try:
+        kb_uuid = uuid.UUID(kb_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid knowledge base ID format"
+        )
+
+    result = await db.exec(
+        select(KnowledgeBase).where(
+            KnowledgeBase.user_id == current_user.id,
+            KnowledgeBase.id == kb_uuid
+        )
+    )
+    kb = result.first()
+    if not kb:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Knowledge base not found"
+        )
+
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Knowledge base name cannot be empty")
+        kb.name = name
+
+    if payload.provider_id is not None:
+        provider = await _resolve_provider(db, current_user.id, payload.provider_id)
+        if not provider:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Embedding provider not found or not configured"
+            )
+        kb.provider_id = provider.id
+
+    if payload.embedding_model is not None:
+        model = payload.embedding_model.strip()
+        if not model:
+            raise HTTPException(status_code=400, detail="Embedding model cannot be empty")
+        kb.embedding_model = model
+
+    if payload.rerank_model is not None:
+        kb.rerank_model = payload.rerank_model.strip() or None
+
+    if payload.clear_custom_vector_db:
+        kb.vector_api_key_enc = None
+        kb.vector_index_host = None
+    else:
+        key_was_set = "vector_api_key" in payload.model_fields_set
+        host_was_set = "vector_index_host" in payload.model_fields_set
+        if key_was_set != host_was_set:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provide both vector_api_key and vector_index_host to rotate vector database credentials"
+            )
+        if key_was_set and host_was_set:
+            key = (payload.vector_api_key or "").strip()
+            host = (payload.vector_index_host or "").strip()
+            if not key or not host:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Both Vector API Key and Index Host are required"
+                )
+            try:
+                from pinecone import Pinecone
+                Pinecone(api_key=key).Index(host=host).describe_index_stats()
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Could not connect to Pinecone index: {str(e)}"
+                )
+            kb.vector_api_key_enc = encrypt(key)
+            kb.vector_index_host = host
+
+    db.add(kb)
+    await db.commit()
+    await db.refresh(kb)
+    return {
+        "id": str(kb.id),
+        "name": kb.name,
+        "provider_id": str(kb.provider_id),
+        "namespace": kb.namespace,
+        "embedding_model": kb.embedding_model,
+        "vector_index_host": kb.vector_index_host,
+        "has_custom_vector_db": bool(kb.vector_api_key_enc),
+        "rerank_model": kb.rerank_model,
+        "created_at": kb.created_at.isoformat()
+    }
+
 @router.delete("/{kb_id}", response_model=dict)
 async def delete_knowledge_base(
     kb_id: str,
@@ -201,9 +315,21 @@ async def delete_knowledge_base(
             detail="Knowledge base not found"
         )
     
-    # In a real implementation, we would also delete the Pinecone namespace
-    # and all associated documents
-    
+    # Remove vectors and document rows before deleting the parent KB. The
+    # namespace is unique to this KB, so delete_all cannot affect another KB.
+    from app.knowledge.retriever import KnowledgeRetriever
+    retriever = KnowledgeRetriever(
+        api_key=decrypt(kb.vector_api_key_enc) if kb.vector_api_key_enc else None,
+        index_host=kb.vector_index_host,
+    )
+    await retriever.delete_collection(kb.namespace)
+
+    documents_result = await db.exec(
+        select(KbDocument).where(KbDocument.kb_id == kb.id)
+    )
+    for document in documents_result.all():
+        await db.delete(document)
+
     await db.delete(kb)
     await db.commit()
     

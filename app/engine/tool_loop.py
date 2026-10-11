@@ -85,6 +85,13 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
             
             # Detailed trace logging for tool results
             trace.log_tool_detail(tc['name'], tc['args'], res)
+            try:
+                from app.engine.runner import _publish_run_event
+                await _publish_run_event(ctx.run_id, "tool_executed", {
+                    "tool": tc["name"], "success": res.ok,
+                })
+            except Exception:
+                pass
             
             errors += 0 if res.ok else 1
             messages.append(ToolMessage(content=res.model_dump_json(exclude_none=True),

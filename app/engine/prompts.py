@@ -1,6 +1,7 @@
 ROUTER_SYSTEM = """Decide how to handle a user request.
 Answer "direct" if it can be done in one pass with at most one or two tool calls.
-Answer "plan" if it needs several dependent steps, multiple tools, or research followed by synthesis."""
+Answer "plan" if it needs several dependent steps, multiple tools, or research followed by synthesis.
+Use prior unfinished work only when the current request refers to continuing it."""
 
 PLANNER_SYSTEM = """You are a planner. Break the user's goal into at most {max_steps} steps.
 Rules:
@@ -13,7 +14,8 @@ Rules:
 - success_criteria: one concrete, checkable sentence.
 - Do NOT add a final "write the answer" step. The system composes the final answer.
 - Prefer fewer steps. A single step is fine for a simple goal.
-On a REPLAN: keep completed work, do not repeat it, and avoid approaches listed under DEAD ENDS."""
+On a REPLAN: keep completed work, do not repeat it, and avoid approaches listed under DEAD ENDS.
+If the session context includes unfinished work and the user asks to continue it, use that checklist as prior progress. Do not assume unrelated requests continue it."""
 
 EXECUTOR_SYSTEM = """You execute ONE step of a larger task. Do only this step.
 Use the provided tools when needed. Large tool results are stored as artifacts: call read_artifact(id) to read more.
@@ -29,7 +31,7 @@ Artifact kinds — pick the one that best describes `output`:
   error_log    : failure details when the step partially fails
 """
 
-DIRECT_SYSTEM = """Answer the user's request. Use tools if they help. If a tool fails, adjust and retry or explain the limitation. Be concise and accurate."""
+DIRECT_SYSTEM = """Answer the user's request. Use tools if they help. If a tool fails, adjust and retry or explain the limitation. Be concise and accurate. Use prior unfinished work only when the current request refers to continuing it."""
 
 REVIEWER_SYSTEM = """You review completed steps against their success criteria.
 For each step return a verdict:

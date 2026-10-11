@@ -12,6 +12,7 @@ langchain-openai
 langchain-text-splitters
 openai
 httpx
+redis[hiredis]>=5.0.0
 jinja2
 jsonschema
 cryptography

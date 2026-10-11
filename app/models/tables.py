@@ -110,9 +110,9 @@ class AgentSession(SQLModel, table=True):
     )
     
     facts: dict = jb()                                # {"items": ["fact", ...]}
-    conversation_history: list[dict] | None = Field(
-        default=None, sa_column=Column(JSONB, nullable=True)
-    )                                                  # [{"role": "user", "content": "..."}, ...]
+    summary: str | None = Field(default=None, nullable=True)
+    summary_message_count: int = 0
+    task_state: dict = jb()                            # compact resumable session-level work state
     created_at: datetime = ts()
     updated_at: datetime = ts()
 
@@ -134,6 +134,16 @@ class Run(SQLModel, table=True):
     stop_reason: str | None = None
     tokens_used: int = 0
     duration_ms: int = 0
+    created_at: datetime = ts()
+
+class ConversationMessage(SQLModel, table=True):
+    __tablename__ = "conversation_messages"
+    __table_args__ = (Index("ix_conversation_messages_session_created", "session_id", "created_at"),)
+    id: UUID = pk()
+    session_id: UUID = Field(foreign_key="sessions.id", index=True, ondelete="CASCADE")
+    run_id: UUID | None = Field(default=None, foreign_key="runs.id", index=True, ondelete="SET NULL")
+    role: str
+    content: str
     created_at: datetime = ts()
 
 class Artifact(SQLModel, table=True):

@@ -30,7 +30,10 @@ async def init_db():
                 "ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS vector_api_key_enc VARCHAR",
                 "ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS vector_index_host VARCHAR",
                 "ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS rerank_model VARCHAR",
-                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS conversation_history JSONB",
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT",
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary_message_count INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS task_state JSONB NOT NULL DEFAULT '{}'::jsonb",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS state JSONB NOT NULL DEFAULT '{}'::jsonb",
                 # agent_kv is a new table — create_all handles it, but belt-and-suspenders:
                 """
                 CREATE TABLE IF NOT EXISTS agent_kv (

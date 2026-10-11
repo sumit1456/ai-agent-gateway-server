@@ -2,7 +2,8 @@ from __future__ import annotations
 import json
 
 # character budgets per role (~4 chars per token)
-BUDGET = {"planner": 6000, "executor": 8000, "reviewer": 5000, "finalizer": 10000}
+BUDGET = {"router": 5000, "direct": 13000, "planner": 6000,
+          "executor": 8000, "reviewer": 5000, "finalizer": 10000}
 
 def clip(s: str | None, n: int) -> str:
     s = s or ""
@@ -24,6 +25,49 @@ def assemble(sections: list[tuple[str, str]], budget: int) -> str:
 
 def _facts(state) -> str:
     return "\n".join(f"- {f}" for f in state.get("facts", []))
+
+def conversation_context(ctx) -> str:
+    parts = []
+    task_state = getattr(ctx, "session_task_state", {}) or {}
+    if task_state.get("status") in {"in_progress", "interrupted"}:
+        unfinished = [t for t in task_state.get("tasks", [])
+                      if t.get("status") not in {"done", "completed"}]
+        if unfinished:
+            task_lines = [
+                f"- [{t.get('status', 'pending')}] {t.get('description', t.get('goal', ''))}"
+                for t in unfinished
+            ]
+            parts.append(clip(
+                "UNFINISHED WORK FROM PRIOR RUN "
+                f"({task_state.get('run_id', 'unknown')}): {task_state.get('objective', '')}\n"
+                + "\n".join(task_lines), 900
+            ))
+    if getattr(ctx, "conversation_summary", ""):
+        parts.append("SESSION SUMMARY\n" + clip(ctx.conversation_summary, 1000))
+    messages = getattr(ctx, "recent_messages", []) or []
+    if messages:
+        rendered_lines = [
+            f"[{m.get('timestamp', '')}] {m.get('role', 'unknown').upper()}: {m.get('content', '')}"
+            for m in messages
+        ]
+        recent = []
+        used = 0
+        for line in reversed(rendered_lines):
+            if used + len(line) + 1 > 1800:
+                room = 1800 - used - 1
+                if room > 200:
+                    recent.append(clip(line, room))
+                break
+            recent.append(line)
+            used += len(line) + 1
+        parts.append("RECENT CONVERSATION\n" + "\n".join(reversed(recent)))
+    memories = getattr(ctx, "retrieved_memories", []) or []
+    if memories:
+        parts.append("OLDER RELEVANT CONVERSATION (semantic retrieval)\n" + clip("\n".join(
+            f"[{m.get('timestamp', 'unknown time')}] [{m.get('role', 'unknown').upper()}] "
+            f"{m.get('text', '')}" for m in memories
+        ), 1000))
+    return "\n\n".join(parts)
 
 def _progress(state) -> str:
     return "\n".join(f"[{s['status']}] {s['id']}: {s['goal']} -> {s.get('result_summary') or ''}"
@@ -48,6 +92,7 @@ def build_view(role: str, state, ctx, step=None, wave=None, kb_text: str | None 
         tools = "\n".join(ctx.tools.describe(exclude={"read_artifact"}))
         sections = [
             ("GOAL", state["goal"]),
+            ("CONVERSATION CONTEXT", conversation_context(ctx)),
             ("VARIABLES", variables),
             ("AVAILABLE TOOLS", tools or "(none)"),
             ("KNOWLEDGE BASE", "available (use kb_queries / kb_search)" if ctx.kb_namespaces else "not available"),
@@ -81,7 +126,8 @@ def build_view(role: str, state, ctx, step=None, wave=None, kb_text: str | None 
                 f"[{s['id']}] goal: {s['goal']}\nsuccess criteria: {s.get('success_criteria', '')}\n"
                 f"status: {s['status']}\nsummary: {s.get('result_summary')}\n"
                 f"output: {clip(art['content'], 1500) if art else ''}\nproblems: {s.get('problems', [])}")
-        return assemble([("OVERALL GOAL", state["goal"]), ("STEPS TO REVIEW", "\n\n".join(blocks))],
+        return assemble([("OVERALL GOAL", state["goal"]),
+                         ("STEPS TO REVIEW", "\n\n".join(blocks))],
                         BUDGET["reviewer"])
 
     if role == "finalizer":
@@ -97,6 +143,7 @@ def build_view(role: str, state, ctx, step=None, wave=None, kb_text: str | None 
         stop = state.get("stop_reason") or "done"
         sections = [
             ("USER REQUEST", state["goal"]),
+            ("CONVERSATION CONTEXT", conversation_context(ctx)),
             ("RUN STOPPED EARLY", f"reason: {stop}" if stop != "done" else ""),
             ("STEP RESULTS", "\n\n".join(blocks)),
             ("FACTS", _facts(state)),
