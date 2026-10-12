@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import time
-from app.api import auth, providers, agents, tools, knowledge, runs
+from app.api import auth, providers, agents, tools, knowledge, runs, workflows
 from app.config import settings
 from app.db import init_db
 from app.logging_config import setup_logging, get_logger
@@ -51,6 +51,7 @@ async def log_requests(request: Request, call_next):
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(providers.router, prefix="/v1/providers", tags=["providers"])
 app.include_router(agents.router, prefix="/v1/agents", tags=["agents"])
+app.include_router(workflows.router, prefix="/v1/workflows", tags=["workflows"])
 app.include_router(tools.router, prefix="/v1/tools", tags=["tools"])
 app.include_router(knowledge.router, prefix="/v1/knowledge-bases", tags=["knowledge"])
 app.include_router(runs.router, prefix="/v1", tags=["runs"])

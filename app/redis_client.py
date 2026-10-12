@@ -2,12 +2,15 @@
 Redis client for pub/sub messaging.
 Used for real-time streaming of agent execution events.
 """
+import asyncio
 import redis.asyncio as redis
 from typing import Optional
 from app.config import settings
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+HISTORY_CACHE_VERSION_TTL_SECONDS = 86400
 
 _redis_client: Optional[redis.Redis] = None
 
@@ -90,3 +93,52 @@ async def publish_event(channel: str, event_type: str, data: dict) -> bool:
     except Exception as e:
         logger.error(f"Failed to publish event to {channel}: {e}")
         return False
+
+
+async def conversation_history_version(client: redis.Redis, session_id: str) -> int:
+    """Return the cache generation for one session's conversation history."""
+    value = await client.get(f"history:version:{session_id}")
+    return int(value or 0)
+
+
+async def prime_recent_conversation_history(
+    session_id: str | None, messages: list[dict]
+) -> None:
+    """Warm a short-lived recent-history snapshot already read for run context."""
+    if not session_id or not messages:
+        return
+    try:
+        client = await asyncio.wait_for(get_redis(), timeout=0.2)
+        if client:
+            import json
+            version = await asyncio.wait_for(
+                conversation_history_version(client, session_id), timeout=0.2
+            )
+            key = f"history:recent:{session_id}:{version}"
+            payload = json.dumps(messages)
+            if len(payload) > 65536:
+                return
+            await asyncio.wait_for(
+                client.set(key, payload, ex=30), timeout=0.2
+            )
+    except Exception as exc:
+        logger.debug("Could not warm conversation history cache for %s: %s", session_id, exc)
+
+
+async def invalidate_conversation_history(session_id: str | None) -> None:
+    """Advance the session history cache generation after a committed message write."""
+    if not session_id:
+        return
+    try:
+        client = await asyncio.wait_for(get_redis(), timeout=0.2)
+    except Exception:
+        return
+    if not client:
+        return
+    try:
+        key = f"history:version:{session_id}"
+        await asyncio.wait_for(client.incr(key), timeout=0.2)
+        await asyncio.wait_for(client.expire(key, HISTORY_CACHE_VERSION_TTL_SECONDS), timeout=0.2)
+    except Exception as exc:
+        # The cache is optional; Postgres remains the source of truth.
+        logger.debug("Could not invalidate conversation history cache for %s: %s", session_id, exc)

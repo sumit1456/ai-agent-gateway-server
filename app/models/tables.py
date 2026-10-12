@@ -53,9 +53,44 @@ class Agent(SQLModel, table=True):
     user_id: UUID = Field(foreign_key="users.id", index=True)
     name: str
     provider_id: UUID = Field(foreign_key="providers.id", ondelete="CASCADE")
+    workflow_version_id: UUID | None = Field(default=None, foreign_key="workflow_versions.id", nullable=True)
     config: dict = jb()                               # validated AgentConfig JSON
     created_at: datetime = ts()
     updated_at: datetime = ts()
+
+class Workflow(SQLModel, table=True):
+    __tablename__ = "workflows"
+    id: UUID = pk()
+    user_id: UUID = Field(foreign_key="users.id", index=True, ondelete="CASCADE")
+    name: str
+    description: str = ""
+    source_preset: str | None = Field(default=None, nullable=True)
+    created_at: datetime = ts()
+    updated_at: datetime = ts()
+
+class WorkflowVersion(SQLModel, table=True):
+    __tablename__ = "workflow_versions"
+    __table_args__ = (UniqueConstraint("workflow_id", "version"),)
+    id: UUID = pk()
+    workflow_id: UUID = Field(foreign_key="workflows.id", index=True, ondelete="CASCADE")
+    version: int = 1
+    definition: dict = jb()
+    is_active: bool = True
+    created_at: datetime = ts()
+
+class WorkflowRunStep(SQLModel, table=True):
+    __tablename__ = "workflow_run_steps"
+    __table_args__ = (UniqueConstraint("run_id", "node_id", "attempt"), Index("ix_workflow_run_steps_run", "run_id"))
+    id: UUID = pk()
+    run_id: UUID = Field(foreign_key="runs.id", index=True, ondelete="CASCADE")
+    node_id: str
+    attempt: int = 1
+    status: str = "pending"
+    input: dict = jb()
+    output: dict = jb()
+    error: str | None = Field(default=None, nullable=True)
+    started_at: datetime | None = Field(default=None, nullable=True)
+    finished_at: datetime | None = Field(default=None, nullable=True)
 
 class Tool(SQLModel, table=True):
     __tablename__ = "tools"
@@ -122,6 +157,7 @@ class Run(SQLModel, table=True):
     agent_id: UUID = Field(foreign_key="agents.id", index=True, ondelete="CASCADE")
     user_id: UUID = Field(foreign_key="users.id", index=True)  # Company/Organization
     session_id: UUID | None = Field(default=None, foreign_key="sessions.id", ondelete="SET NULL")
+    workflow_version_id: UUID | None = Field(default=None, foreign_key="workflow_versions.id", nullable=True)
     
     # End-user who made this request (from the subscribing company's system)
     end_user_id: str | None = Field(default=None, index=True)  # Optional but recommended for analytics

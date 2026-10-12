@@ -1,4 +1,4 @@
-"""Send four dependent prompts through one agent session and stream each reply."""
+"""Interactively chat with an agent using one persistent test session."""
 import ast
 import json
 import time
@@ -121,9 +121,9 @@ def _stream_run(base_url: str, run_id: str, headers: dict) -> str:
 
 def main() -> None:
     api_key, base_url = _run_test_credentials()
-    # Keep all four runs in one stable session for conversation-history testing.
-    end_user_id = "test_100"
-    session_id = "quick-test-session"
+    # Reuse one session so the agent sees this as a continuous conversation.
+    end_user_id = "codex2311"
+    session_id = "quick-test-session1111"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "X-End-User-ID": end_user_id,
@@ -138,30 +138,20 @@ def main() -> None:
         raise RuntimeError("No agent is configured for this API key.")
 
     agent_id = agents[0]["id"]
-    questions = [
-        "I'm planning a short trip to Japan. Recommend one city to visit and explain why.",
-        None,  # Built from the first answer so this question depends on it.
-        None,  # Built from the second answer so this question depends on it.
-        "List all the questions I have asked in this conversation, in order.",
-    ]
+    print("Interactive agent chat. Type 'exit' to quit.", flush=True)
+    while True:
+        try:
+            prompt = input("\nYou: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nChat ended.", flush=True)
+            break
+        if prompt.lower() == "exit":
+            print("Chat ended.", flush=True)
+            break
+        if not prompt:
+            continue
 
-    answers = []
-    for index in range(4):
-        if index == 1:
-            prompt = (
-                "Based on your city recommendation, name one specific attraction to visit "
-                f"there. Your previous answer was: {answers[0]}"
-            )
-        elif index == 2:
-            prompt = (
-                "Based on the city and attraction from your previous answers, recommend "
-                "one local food I should try there. City recommendation: "
-                f"{answers[0]} Attraction recommendation: {answers[1]}"
-            )
-        else:
-            prompt = questions[index]
-
-        print(f"\nQuestion {index + 1}/4: {prompt}", flush=True)
+        print("Agent: ", end="", flush=True)
         run_response = requests.post(
             f"{base_url}/v1/agents/{agent_id}/run",
             headers=headers,
@@ -170,7 +160,7 @@ def main() -> None:
         )
         run_response.raise_for_status()
         run_id = run_response.json()["run_id"]
-        answers.append(_stream_run(base_url, run_id, headers))
+        _stream_run(base_url, run_id, headers)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import select
 from app.security import current_user
 from app.db import get_db
-from app.models.tables import User, Agent, Provider, AgentSession, Run, Artifact
+from app.models.tables import User, Agent, Provider, AgentSession, Run, Artifact, WorkflowVersion, Workflow
 from app.models.agent_config import AgentConfig
 from typing import List
 import uuid
@@ -19,50 +19,17 @@ async def get_default_prompts():
     Users can use these as a starting point for customization.
     Returns the default prompts for router, planner, executor, reviewer, direct, and finalizer.
     """
-    from app.engine.prompts import (
-        ROUTER_SYSTEM, PLANNER_SYSTEM, EXECUTOR_SYSTEM,
-        REVIEWER_SYSTEM, DIRECT_SYSTEM, FINALIZER_SYSTEM
-    )
+    from app.engine.prompt_templates import ROLE_PROMPT_TEMPLATES, ROLE_PROMPT_PRESETS
     
     return {
-        "default_prompts": {
-            "router": {
-                "prompt": ROUTER_SYSTEM,
-                "description": "Decides whether to use 'direct' mode (simple) or 'plan' mode (complex multi-step)",
-                "variables": []
-            },
-            "planner": {
-                "prompt": PLANNER_SYSTEM,
-                "description": "Breaks down complex tasks into steps",
-                "variables": ["{max_steps}"]
-            },
-            "executor": {
-                "prompt": EXECUTOR_SYSTEM,
-                "description": "Executes individual steps of a plan",
-                "variables": []
-            },
-            "reviewer": {
-                "prompt": REVIEWER_SYSTEM,
-                "description": "Reviews completed steps and decides if they meet success criteria",
-                "variables": []
-            },
-            "direct": {
-                "prompt": DIRECT_SYSTEM,
-                "description": "Handles simple queries in a single pass",
-                "variables": []
-            },
-            "finalizer": {
-                "prompt": FINALIZER_SYSTEM,
-                "description": "Composes the final answer from step results",
-                "variables": []
-            }
-        },
+        "default_prompts": ROLE_PROMPT_TEMPLATES,
+        "role_presets": ROLE_PROMPT_PRESETS,
         "builtin_tools": [
             "read_artifact", "list_artifacts", "remember_fact",
             "get_session_memory", "store_kv", "get_kv",
             "get_conversation_history", "kb_search"
         ],
-        "note": "Custom prompts are optional. If not provided, these defaults are used. Built-in tools are always available to agents."
+        "note": "Role presets and additive instructions are optional. Core role duties remain active unless an advanced full prompt override is supplied. Built-in tools are always available to agents."
     }
 
 
@@ -106,11 +73,13 @@ async def create_agent(
     
     agent_data = config.model_dump(mode="json")
     agent_data["provider_id"] = str(provider.id)
+    workflow_version = await _get_owned_workflow_version(db, current_user.id, config.workflow_version_id)
 
     # Create the agent
     agent = Agent(
         user_id=current_user.id,
         provider_id=provider.id,
+        workflow_version_id=workflow_version.id if workflow_version else None,
         name=config.name,
         config=agent_data
     )
@@ -208,6 +177,8 @@ async def update_agent(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Provider not found or not authorized"
         )
+
+    workflow_version = await _get_owned_workflow_version(db, current_user.id, config.workflow_version_id)
     
     # Get existing agent
     result = await db.exec(
@@ -226,6 +197,7 @@ async def update_agent(
     # Update the agent
     from datetime import datetime, timezone
     agent.provider_id = provider.id
+    agent.workflow_version_id = workflow_version.id if workflow_version else None
     agent.name = config.name
     agent_data = config.model_dump(mode="json")
     agent_data["provider_id"] = str(provider.id)
@@ -243,6 +215,24 @@ async def update_agent(
         "config": agent.config,
         "updated_at": agent.updated_at.isoformat()
     }
+
+
+async def _get_owned_workflow_version(db, user_id, version_id):
+    if not version_id:
+        return None
+    try:
+        version_uuid = uuid.UUID(str(version_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid workflow version ID")
+    result = await db.exec(
+        select(WorkflowVersion)
+        .join(Workflow, Workflow.id == WorkflowVersion.workflow_id)
+        .where(WorkflowVersion.id == version_uuid, Workflow.user_id == user_id, WorkflowVersion.is_active == True)
+    )
+    version = result.first()
+    if not version:
+        raise HTTPException(status_code=400, detail="Workflow version not found or not owned by user")
+    return version
 
 @router.delete("/{agent_id}", response_model=dict)
 async def delete_agent(

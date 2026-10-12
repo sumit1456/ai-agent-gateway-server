@@ -4,7 +4,7 @@ from sqlmodel import select
 from pydantic import BaseModel, Field
 from app.security import current_user
 from app.db import get_db
-from app.models.tables import User, Run, Agent, AgentSession, ConversationMessage
+from app.models.tables import User, Run, Agent, AgentSession, ConversationMessage, WorkflowVersion, WorkflowRunStep
 from app.models.agent_config import AgentConfig
 from app.engine.runner import execute_run
 from typing import List, Optional
@@ -234,23 +234,46 @@ async def create_run(
     # Note: In a real implementation, we would properly handle the agent config
     # For now, we'll use a simplified config
     agent_cfg = agent.config if isinstance(agent.config, dict) else {}
+    workflow_definition = None
+    if agent.workflow_version_id:
+        workflow_version = await db.get(WorkflowVersion, agent.workflow_version_id)
+        if not workflow_version or not workflow_version.is_active:
+            raise HTTPException(status_code=409, detail="Agent workflow version is missing or inactive")
+        workflow_definition = workflow_version.definition
     agent_models = agent_cfg.get("models") or {}
+    workflow_tool_names = {
+        name
+        for node in (workflow_definition or {}).get("nodes", [])
+        for name in (node.get("tools") or [])
+    }
     if isinstance(agent_models, str):
         agent_models = {"planner": agent_models, "executor": agent_models, "reviewer": agent_models}
 
     config_dict = {
         "name": agent.name,
         "provider_id": str(agent.provider_id),
+        "workflow_version_id": str(agent.workflow_version_id) if agent.workflow_version_id else None,
+        "workflow_definition": workflow_definition,
         "models": {
             "planner": agent_models.get("planner", "meta-llama/llama-3.1-70b-instruct"),
             "executor": agent_models.get("executor", "meta-llama/llama-3.1-70b-instruct"),
             "reviewer": agent_models.get("reviewer", "meta-llama/llama-3.1-8b-instruct")
         },
         "system_prompt": agent_cfg.get("system_prompt", "You are a helpful assistant."),
+        "router_prompt": agent_cfg.get("router_prompt"),
+        "planner_prompt": agent_cfg.get("planner_prompt"),
+        "executor_prompt": agent_cfg.get("executor_prompt"),
+        "controller_prompt": agent_cfg.get("controller_prompt"),
+        "reviewer_prompt": agent_cfg.get("reviewer_prompt"),
+        "direct_prompt": agent_cfg.get("direct_prompt"),
+        "finalizer_prompt": agent_cfg.get("finalizer_prompt"),
+        "role_prompt_presets": agent_cfg.get("role_prompt_presets", {}),
+        "role_instructions": agent_cfg.get("role_instructions", {}),
         "variables": list(agent_cfg.get("variables", {}).keys()) if isinstance(agent_cfg.get("variables"), dict) else list(agent_cfg.get("variables", [])),
-        "tools": list(agent_cfg.get("tools", [])),
+        "tools": sorted(set(agent_cfg.get("tools", [])) | workflow_tool_names),
         "knowledge_base_ids": list(agent_cfg.get("knowledge_base_ids", [])),
         "temperature": agent_cfg.get("temperature", 0.3),
+        "context_window_tokens": agent_cfg.get("context_window_tokens", 4096),
         "limits": agent_cfg.get("limits") or {
             "max_iterations": 5,
             "max_tokens_per_run": 50000,
@@ -269,6 +292,7 @@ async def create_run(
         agent_id=agent.id,
         user_id=current_user.id,
         session_id=session.id,
+        workflow_version_id=agent.workflow_version_id,
         end_user_id=effective_end_user_id,  # Store end_user_id
         input=input,
         variables=variables or {},
@@ -284,6 +308,8 @@ async def create_run(
         content=input,
     ))
     await db.commit()
+    from app.redis_client import invalidate_conversation_history
+    await invalidate_conversation_history(str(session.id))
 
     asyncio.create_task(execute_run(
         run_id=run_id,
@@ -334,6 +360,7 @@ async def get_run(
     response = {
         "id": str(run.id),
         "agent_id": str(run.agent_id),
+        "workflow_version_id": str(run.workflow_version_id) if run.workflow_version_id else None,
         "status": run.status,
         "input": run.input,
         "variables": run.variables,
@@ -343,6 +370,15 @@ async def get_run(
         "duration_ms": run.duration_ms,
         "created_at": run.created_at.isoformat()
     }
+    response["workflow_transitions"] = (run.state or {}).get("workflow_transitions", [])
+    step_result = await db.exec(select(WorkflowRunStep).where(WorkflowRunStep.run_id == run.id).order_by(WorkflowRunStep.started_at, WorkflowRunStep.id))
+    response["workflow_steps"] = [
+        {"id": str(step.id), "node_id": step.node_id, "attempt": step.attempt,
+         "status": step.status, "input": step.input, "output": step.output,
+         "error": step.error, "started_at": step.started_at.isoformat() if step.started_at else None,
+         "finished_at": step.finished_at.isoformat() if step.finished_at else None}
+        for step in step_result.all()
+    ]
     
     # Add helpful error context if failed
     if run.status == "failed" and run.result and "error" in run.result:

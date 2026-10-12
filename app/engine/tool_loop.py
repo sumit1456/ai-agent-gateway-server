@@ -9,7 +9,9 @@ from app.tools.call import call_tool
 log = logging.getLogger(__name__)
 
 async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
-                        stream_answer: bool = False) -> tuple[str, int]:
+                        stream_answer: bool = False,
+                        prior_messages: list | None = None,
+                        role: str = "executor") -> tuple[str, int]:
     """
     Mini ReAct loop: model turn -> run tool calls (in parallel) -> feed results -> repeat.
     Returns (final_text, number_of_failed_tool_calls). Raises StopRun on cancel/timeout/budget.
@@ -22,7 +24,7 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
     log.info(f"🔧 [TOOL_LOOP] Available tools: {tool_names}")
     trace.log_custom(f"Tool loop starting - max_turns={ctx.config.limits.max_tool_turns}, tools={tool_names}")
     
-    messages = [SystemMessage(content=system), HumanMessage(content=user)]
+    messages = [SystemMessage(content=system), *(prior_messages or []), HumanMessage(content=user)]
     schemas = ctx.tools.schemas(tool_names)
     
     log.info(f"📋 [TOOL_LOOP] Tool schemas prepared: {len(schemas)} tools")
@@ -45,7 +47,7 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
             trace.log_custom("Final turn - forcing answer without tools")
         
         llm_start = time.time()
-        ai = await llm.llm_turn(ctx, "executor", messages,
+        ai = await llm.llm_turn(ctx, role, messages,
                                 tools=None if (last or not schemas) else schemas,
                                 stream_answer=stream_answer)
         llm_duration = int((time.time() - llm_start) * 1000)

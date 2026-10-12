@@ -68,14 +68,19 @@ Recent messages are loaded from Postgres, grouped by `run_id`, and selected as u
 
 The summary is used for older context. After enough older messages accumulate, the runner makes a reviewer-model call to update a summary in batches, leaving the latest six messages (three turns) verbatim. This compaction happens after the main answer has been persisted. It is not vector retrieval, and its extra model-call duration is not reflected in the already-recorded `Run.duration_ms` or finalized trace duration.
 
-### Where context reaches the LLM today
+### Role-specific prompt and context contract
 
-- **Router:** includes summary/recent messages when it needs to ask the model to choose a route.
-- **Direct path:** includes context in the direct request.
-- **Executor:** receives the goal, assigned step, success criteria, upstream artifacts, facts, and KB results; it does not receive conversation history.
-- **Reviewer:** receives the goal and completed outputs; it does not receive conversation history.
-- **Planner:** receives the current goal, bounded conversation context, session task state, tools, KB availability, and current run progress through its budgeted view.
-- **Finalizer:** receives the goal and step results; it does not receive conversation history.
+Role templates and selectable behavior presets live in `app/engine/prompt_templates.py`. `get_prompt` composes the built-in role duty with the selected preset and per-agent additional instructions. The dashboard saves those selections and instructions in the agent configuration JSON. Advanced `*_prompt` fields remain full overrides.
+
+- **Router:** receives the current goal, available tools, and KB availability. It does not receive prior turns.
+- **Direct responder:** receives the current request, tools, shared agent persona, and at most four recent turns.
+- **Planner:** receives the current goal, task ledger, facts, tools, KB availability, and replan state. It receives compact prior session context only when the request explicitly asks to continue or resume earlier work.
+- **Executor:** receives the overall goal, its assigned step and criteria, dependencies/inputs, relevant facts, and KB results. It does not receive prior conversation turns.
+- **Controller:** receives the current workflow state and state-derived allowed actions. It does not receive prior conversation turns.
+- **Reviewer:** receives success criteria and completed step evidence. It does not receive prior conversation turns.
+- **Finalizer:** receives the user request, task ledger, step results, facts, and shared agent persona. It does not receive prior conversation turns by default.
+
+Prompt views have per-role character budgets; these are conservative token approximations, not tokenizer-exact counts. System prompt and tool-schema tokens are accounted for separately by the model/provider.
 
 `get_conversation_history` is SQL-backed chronological history. `search_conversation_memory` is optional semantic retrieval over older turns. The latter is available only when an attached KB provides Pinecone credentials, and it filters on record type, user, agent, and exact session ID. Recent transcript remains sourced from Postgres.
 
@@ -143,7 +148,7 @@ The code stores completed conversation turns in Pinecone and exposes semantic re
 
 ## 6. Run events, results, cancellation, and process lifetime
 
-Run progress is emitted to the in-process event sink and, when Redis is available, published on `run:{run_id}`. The API exposes run polling and an SSE stream. The final answer is returned from `Run.result`; `run_completed` also carries output, token count, duration, and stop reason. Redis is an event transport, not the durable result store.
+Run progress is emitted to the in-process event sink and, when Redis is available, published on `run:{run_id}`. The API exposes run polling and an SSE stream. The final answer is returned from `Run.result`; `run_completed` also carries output, token count, duration, and stop reason. Redis also holds short-lived, session-scoped conversation-history query results; cache failures fall back to Postgres, which remains the source of truth.
 
 Active contexts/tasks are kept in in-process registries (`RUNS`/`BACKGROUND`). This supports cancellation and client-tool callbacks in a single process, but does not provide cross-worker coordination or recovery after a process restart. A durable job queue and shared run coordination would be needed for multi-worker production execution.
 

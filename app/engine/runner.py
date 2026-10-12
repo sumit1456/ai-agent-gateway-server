@@ -57,6 +57,7 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     user_tools: list = []
     conversation_summary = ""
     recent_messages: list[dict] = []
+    history_snapshot: list[dict] = []
     session_task_state: dict = {}
     history_truncated = False
     retrieved_memories: list[dict] = []
@@ -103,6 +104,7 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
                         {"role": m.role, "content": m.content, "timestamp": m.created_at.isoformat()}
                         for m in selected_rows
                     ]
+                    history_snapshot = recent_messages
                     # Bound raw transcript context by characters (~4 chars/token).
                     # Keep the newest messages first, then restore chronological order.
                     context_budget = 4000
@@ -250,6 +252,10 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     for tool in build_builtin_tools(ctx):
         registry.register(tool)
 
+    if session_id and history_snapshot:
+        from app.redis_client import prime_recent_conversation_history
+        await prime_recent_conversation_history(str(session_id), history_snapshot)
+
     # 5. Register user-defined tools
     if user_tools:
         _register_user_tools(registry, user_tools)
@@ -364,6 +370,7 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
     await _publish_run_event(run_id, "run_started", {
         "input": getattr(ctx, "input", ""),
         "agent_id": getattr(ctx, "agent_id", None),
+        "workflow_version_id": getattr(ctx.config, "workflow_version_id", None),
     })
     log.info(f"🚀 [RUN_GRAPH] Starting run_id={run_id}")
     log.info(f"📝 [RUN_GRAPH] Input: {ctx.input if hasattr(ctx, 'input') else 'N/A'}")
@@ -384,6 +391,8 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
             "artifacts": {},
             "dead_ends": [],
             "iteration": 0,
+            "controller_iterations": 0,
+            "review_complete": False,
             "last_wave": [],
             "pending_replan": False,
             "replan_reason": "",
@@ -395,13 +404,19 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         log.info(f"🎬 [RUN_GRAPH] Invoking graph...")
         graph_start = time.time()
         
-        graph = get_graph()
         final_state = dict(initial_state)
-        async for update in graph.astream(initial_state, config, stream_mode="updates"):
-            for node_update in update.values():
-                if isinstance(node_update, dict):
-                    final_state.update(node_update)
-                    await _persist_run_checkpoint(run_id, ctx, final_state)
+        workflow_definition = getattr(ctx.config, "workflow_definition", None)
+        if workflow_definition:
+            from app.engine.workflow_runner import run_workflow
+            final_state.update(await run_workflow(ctx, run_id, workflow_definition))
+            await _persist_run_checkpoint(run_id, ctx, final_state)
+        else:
+            graph = get_graph()
+            async for update in graph.astream(initial_state, config, stream_mode="updates"):
+                for node_update in update.values():
+                    if isinstance(node_update, dict):
+                        final_state.update(node_update)
+                        await _persist_run_checkpoint(run_id, ctx, final_state)
         
         graph_duration = int((time.time() - graph_start) * 1000)
         log.info(f"✅ [RUN_GRAPH] Graph completed in {graph_duration}ms")
@@ -457,6 +472,7 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         # Update Run record in DB
         from app.db import SessionLocal
         from app.models.tables import Run, ConversationMessage
+        run = None
         try:
             async with SessionLocal() as db:
                 run = await db.get(Run, uuid.UUID(run_id))
@@ -490,6 +506,10 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
                     await db.commit()
         except Exception as db_exc:
             print(f"Failed to update run record: {db_exc}")
+
+        if run and run.session_id and final_answer and not error:
+            from app.redis_client import invalidate_conversation_history
+            await invalidate_conversation_history(str(run.session_id))
 
         if not error and final_answer:
             await _index_run_conversation(ctx, run_id)

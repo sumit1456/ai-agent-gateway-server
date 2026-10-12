@@ -7,8 +7,10 @@ from app.engine.retry import plan_hash
 from app.engine.state_ops import (PlanError, apply_result, fallback_answer, ready_steps,
                                   validate_plan)
 from app.engine.tool_loop import run_step, run_tool_loop
-from app.engine.types import Plan, ReviewResult, RouteDecision, RunState, StepResult, StepVerdict, StopRun
-from app.engine.views import build_view, clip, assemble, conversation_context
+from app.engine.types import (ControllerDecision, Plan, ReviewResult, RouteDecision,
+                              RunState, StepResult, StepVerdict, StopRun)
+from app.engine.views import (build_view, clip, assemble, conversation_messages,
+                              context_char_budget, task_ledger)
 from app.engine.trace_logger import get_trace_logger
 
 log = logging.getLogger(__name__)
@@ -72,16 +74,17 @@ async def router_node(state: RunState, config: RunnableConfig) -> dict:
         system = get_prompt(ctx.config, "router")
         user = assemble([
             ("GOAL", state["goal"]),
+            ("SHARED TASK LIST", task_ledger(state)),
             ("AVAILABLE TOOLS", ", ".join(visible) if visible else "(none)"),
             ("KNOWLEDGE BASE", "available" if ctx.kb_namespaces else "not available"),
-            ("SESSION CONTEXT", conversation_context(ctx)),
-        ], 5000)
+        ], context_char_budget(ctx, 5000))
         
-        # Log the full conversation
         from langchain_core.messages import SystemMessage, HumanMessage
         messages = [SystemMessage(content=system), HumanMessage(content=user)]
         
-        decision: RouteDecision = await llm.structured_call(ctx, "reviewer", RouteDecision, system, user)
+        decision: RouteDecision = await llm.structured_call(
+            ctx, "reviewer", RouteDecision, system, user
+        )
         
         # Log LLM interaction once here at the node level
         trace.log_llm_messages("reviewer", messages, decision)
@@ -117,8 +120,8 @@ async def direct_node(state: RunState, config: RunnableConfig) -> dict:
     system = f"{ctx.persona}\n\n{direct_prompt}"
     user = assemble([
         ("CURRENT USER MESSAGE", state["goal"]),
-        ("SESSION CONTEXT", conversation_context(ctx)),
-    ], 13000)
+        ("SHARED TASK LIST", task_ledger(state)),
+    ], context_char_budget(ctx, 13000))
     # Combine tool names with kb_search if knowledge base is available
     available_tools = list(ctx.tools.names())
     if ctx.kb_namespaces:
@@ -128,7 +131,10 @@ async def direct_node(state: RunState, config: RunnableConfig) -> dict:
     trace.log_custom(f"Available tools: {available_tools}")
     
     tool_loop_start = time.time()
-    text, errors = await run_tool_loop(ctx, system, user, available_tools, stream_answer=True)
+    text, errors = await run_tool_loop(
+        ctx, system, user, available_tools, stream_answer=True,
+        prior_messages=conversation_messages(ctx, recent_limit=4),
+    )
     tool_loop_duration = int((time.time() - tool_loop_start) * 1000)
     
     log.info(f"✅ [DIRECT] Tool loop completed in {tool_loop_duration}ms")
@@ -170,19 +176,22 @@ async def planner_node(state: RunState, config: RunnableConfig) -> dict:
     trace.log_custom(f"Existing steps: {len(state.get('steps', []))}")
     trace.log_custom(f"Replan reason: {state.get('replan_reason', 'N/A')}")
     
-    system = get_prompt(ctx.config, "planner", max_steps=ctx.config.limits.max_steps)
+    system = f"{ctx.persona}\n\n{get_prompt(ctx.config, 'planner', max_steps=ctx.config.limits.max_steps)}"
     user = build_view("planner", state, ctx)
     
     from langchain_core.messages import SystemMessage, HumanMessage
     messages = [SystemMessage(content=system), HumanMessage(content=user)]
     
-    plan: Plan = await llm.structured_call(ctx, "planner", Plan, system, user)
+    plan: Plan = await llm.structured_call(
+        ctx, "planner", Plan, system, user
+    )
     
     trace.log_llm_messages("planner", messages, plan)
     log.info(f"📋 [PLANNER] LLM generated {len(plan.steps)} new steps")
     
     try:
-        new_steps = validate_plan(plan, set(ctx.tools.names()), set(state.get("plan_hashes", [])),
+        existing_ids = {step["id"] for step in state.get("steps", [])}
+        new_steps = validate_plan(plan, set(ctx.tools.names()), existing_ids,
                                   set(s["id"] for s in state.get("steps", []) if s["status"] == "done"),
                                   ctx.config.limits.max_steps)
     except PlanError as exc:
@@ -264,6 +273,7 @@ async def executor_node(state: RunState, config: RunnableConfig) -> dict:
     
     # Apply results
     local_state = dict(state)  # shallow copy
+    local_state["review_complete"] = False
     for step, res in zip(to_run, step_results):
         apply_result(local_state, ctx, step["id"], res)
         log.info(f"✅ [EXECUTOR] Step {step['id']}: {res.status}")
@@ -293,6 +303,86 @@ async def executor_node(state: RunState, config: RunnableConfig) -> dict:
     _log_timing("EXECUTOR", start_time, ctx, {"steps_executed": len(to_run), "done": done_count, "total": total_count})
     
     return local_state
+
+# ---------------- adaptive controller ----------------
+async def controller_node(state: RunState, config: RunnableConfig) -> dict:
+    """Choose the next bounded workflow action from the current run state."""
+    ctx = get_ctx(config)
+    trace = get_trace_logger(ctx.run_id)
+    from app.engine.runner import _publish_run_event
+    trace.log_node_enter("CONTROLLER", state)
+
+    if reason := ctx.check_limits():
+        trace.log_error(f"Controller stopped run: {reason}")
+        return {"stop_reason": reason}
+
+    steps = state.get("steps", [])
+    ready = ready_steps(steps)
+    terminal = all(step.get("status") in {"done", "failed"} for step in steps)
+    completed = [step for step in steps if step.get("status") == "done"]
+    controller_iterations = state.get("controller_iterations", 0)
+    max_iterations = ctx.config.limits.max_iterations
+
+    allowed = []
+    if ready:
+        allowed.append("execute")
+    if terminal and completed and not state.get("review_complete", False):
+        allowed.append("verify")
+    if terminal or not steps:
+        allowed.append("finalize")
+    if controller_iterations < max_iterations:
+        allowed.append("replan")
+    allowed.append("ask_user")
+
+    user = assemble([
+        ("USER GOAL", state.get("goal", "")),
+        ("SHARED TASK LIST", task_ledger(state)),
+        ("READY STEPS", ", ".join(step.get("id", "") for step in ready) or "none"),
+        ("ALLOWED ACTIONS", ", ".join(allowed)),
+        ("REPLAN COUNT", f"{controller_iterations}/{max_iterations}"),
+        ("PREVIOUS REVIEW / REPLAN REASON", state.get("replan_reason", "")),
+    ], context_char_budget(ctx, 7000))
+    system = get_prompt(ctx.config, "controller")
+    messages = [SystemMessage(content=system), HumanMessage(content=user)]
+    decision: ControllerDecision = await llm.structured_call(
+        ctx, "reviewer", ControllerDecision, system, user
+    )
+    trace.log_llm_messages("controller", messages, decision)
+
+    action = decision.action
+    if action not in allowed:
+        # Treat model routing as a suggestion; state-derived policy remains authoritative.
+        action = (
+            "execute" if ready else
+            "verify" if terminal and completed else
+            "finalize" if terminal or not steps else
+            "replan" if "replan" in allowed else
+            "ask_user"
+        )
+        reason = f"Rejected unavailable action; selected {action} from current run state."
+    else:
+        reason = decision.reason or "No reason supplied."
+
+    result = {
+        "controller_action": action,
+        "controller_reason": reason,
+        "pending_replan": action == "replan",
+        "replan_reason": reason if action == "replan" else "",
+    }
+    if action == "replan":
+        result["controller_iterations"] = controller_iterations + 1
+    if action == "ask_user":
+        result["controller_question"] = decision.question or decision.reason or "What detail should I use to continue?"
+        result["stop_reason"] = "needs_input"
+
+    trace.log_custom(f"Selected next action: {action} ({reason})")
+    trace.log_node_exit("CONTROLLER", result)
+    trace.log_routing_decision("CONTROLLER", action.upper(), reason)
+    await _publish_run_event(ctx.run_id, "controller_decision", {
+        "action": action,
+        "reason": reason,
+    })
+    return result
 
 # ---------------- reviewer ----------------
 async def reviewer_node(state: RunState, config: RunnableConfig) -> dict:
@@ -325,6 +415,7 @@ async def reviewer_node(state: RunState, config: RunnableConfig) -> dict:
         trace.log_error(f"Max iterations reached - forcing finalization")
         result = {
             "pending_replan": False,
+            "review_complete": True,
             "stop_reason": "done",
             "answer": ""
         }
@@ -335,19 +426,10 @@ async def reviewer_node(state: RunState, config: RunnableConfig) -> dict:
     log.info(f"🔍 [REVIEWER] Reviewing {len(done_steps)} completed step(s), iteration {iteration}/{max_iterations}")
     trace.log_custom(f"Reviewing {len(done_steps)} steps at iteration {iteration}/{max_iterations}")
     
-    # Build the review prompt
+    # Reviewer sees the same shared task ledger as planner/executor, plus the
+    # full detail needed to assess completed steps.
     system = get_prompt(ctx.config, "reviewer")
-    blocks = []
-    for s in done_steps:
-        art = ctx.artifacts.get(s.get("artifact_id") or "")
-        blocks.append(
-            f"[{s['id']}] goal: {s['goal']}\nsuccess criteria: {s.get('success_criteria', '')}\n"
-            f"status: {s['status']}\nsummary: {s.get('result_summary')}\n"
-            f"output: {clip(art['content'], 1500) if art else ''}\nproblems: {s.get('problems', [])}")
-    user = assemble([
-        ("OVERALL GOAL", state["goal"]),
-        ("STEPS TO REVIEW", "\n\n".join(blocks)),
-    ], 5000)
+    user = build_view("reviewer", state, ctx, wave=done_steps)
     
     from langchain_core.messages import SystemMessage, HumanMessage
     messages = [SystemMessage(content=system), HumanMessage(content=user)]
@@ -359,6 +441,7 @@ async def reviewer_node(state: RunState, config: RunnableConfig) -> dict:
     # Process the verdicts
     local_state = dict(state)  # shallow copy
     local_state["iteration"] = iteration + 1  # INCREMENT HERE
+    local_state["review_complete"] = True
     needs_replan = False
     replan_reason = ""
     
@@ -421,6 +504,12 @@ async def finalize_node(state: RunState, config: RunnableConfig) -> dict:
     
     finalizer_prompt = get_prompt(ctx.config, "finalizer")
     system = f"{ctx.persona}\n\n{finalizer_prompt}"
+    if state.get("controller_action") == "ask_user":
+        question = state.get("controller_question") or "What detail should I use to continue?"
+        system += (
+            "\n\nThe workflow controller determined that essential information is missing. "
+            f"Ask the user this one focused question: {question} Do not claim the task is complete."
+        )
     # Build the finalizer prompt
     steps = state.get("steps", [])
     per_step = max(1500, 8000 // max(len(steps), 1))
@@ -434,11 +523,14 @@ async def finalize_node(state: RunState, config: RunnableConfig) -> dict:
     stop = state.get("stop_reason") or "done"
     sections = [
         ("USER REQUEST", state["goal"]),
-        ("RUN STOPPED EARLY", f"reason: {stop}" if stop != "done" else ""),
+        ("SHARED TASK LIST", task_ledger(state)),
+        ("RUN STOPPED EARLY", f"reason: {stop}" if stop not in {"done", "needs_input"} else ""),
+        ("QUESTION FOR USER", state.get("controller_question", "")
+         if state.get("controller_action") == "ask_user" else ""),
         ("STEP RESULTS", "\n\n".join(blocks)),
         ("FACTS", "\n".join(f"- {f}" for f in state.get("facts", []))),
     ]
-    user = assemble(sections, 10000)  # finalizer budget
+    user = assemble(sections, context_char_budget(ctx, 10000))  # finalizer budget
     
     from langchain_core.messages import SystemMessage, HumanMessage
     messages = [SystemMessage(content=system), HumanMessage(content=user)]

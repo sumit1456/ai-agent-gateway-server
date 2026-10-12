@@ -69,6 +69,11 @@ class RunState(TypedDict, total=False):
     last_wave: list[str]
     pending_replan: bool
     replan_reason: str
+    controller_iterations: int
+    controller_action: str
+    controller_reason: str
+    controller_question: str | None
+    review_complete: bool
     plan_hashes: list[str]
     stop_reason: str | None
     answer: str
@@ -77,6 +82,11 @@ class RunState(TypedDict, total=False):
 class RouteDecision(BaseModel):
     mode: Literal["direct", "plan"]
     reason: str = ""
+
+class ControllerDecision(BaseModel):
+    action: Literal["execute", "verify", "replan", "ask_user", "finalize"]
+    reason: str = ""
+    question: str | None = None
 
 class PlanStep(BaseModel):
     id: str

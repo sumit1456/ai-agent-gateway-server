@@ -5,7 +5,8 @@ Each tool receives the RunContext at construction so it can access in-memory
 state (artifacts, retriever) and the database (session memory, KV store).
 """
 from __future__ import annotations
-import json, logging
+import asyncio, json, logging
+import hashlib
 from typing import TYPE_CHECKING, Any, Optional
 from pydantic import BaseModel, Field
 from app.tools.base import BaseTool, ToolResult
@@ -34,10 +35,10 @@ class GetKVInput(BaseModel):
     key: str = Field(..., description="The key to retrieve")
 
 class GetConversationHistoryInput(BaseModel):
-    last_n: int = Field(default=10, description="Number of recent messages to retrieve (default: 10)")
-    from_date: Optional[str] = Field(default=None, description="ISO date string to filter messages from (e.g., '2024-01-15' or '2024-01-15T10:00:00')")
-    to_date: Optional[str] = Field(default=None, description="ISO date string to filter messages until (e.g., '2024-01-16')")
-    role: Optional[str] = Field(default=None, description="Filter by role: 'user' or 'assistant'")
+    last_n: int = Field(default=10, ge=1, le=100, description="Maximum messages to return, in chronological order (1-100)")
+    from_date: Optional[str] = Field(default=None, description="Inclusive ISO-8601 start date/time. Date-only values mean midnight UTC; timestamps without an offset are interpreted as UTC.")
+    to_date: Optional[str] = Field(default=None, description="Inclusive ISO-8601 end timestamp. A date-only value includes that whole UTC date. Timestamps without an offset are interpreted as UTC.")
+    role: Optional[str] = Field(default=None, pattern="^(user|assistant)$", description="Optionally return only 'user' or 'assistant' messages")
 
 
 class SearchConversationMemoryInput(BaseModel):
@@ -383,10 +384,11 @@ class GetConversationHistoryTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Retrieve conversation history from previous runs in this session. "
-            "Returns the last N messages (user questions and assistant answers). "
-            "Supports filtering by date range and role. "
-            "Examples: get messages from yesterday, filter only user messages, etc."
+            "Retrieve older messages from this exact session. Recent turns are already included in your conversation context, "
+            "so do NOT call this tool when the answer is visible there. Call it when the user asks to search, list, or "
+            "compare earlier turns, asks about a date range, or when required details are outside the visible context. "
+            "Use role='user' for questions the user asked, and explicit ISO-8601 UTC date bounds for time filters "
+            "(for a date-only to_date, the entire UTC date is included). Results are chronological and exclude the current run."
         )
 
     @property
@@ -397,86 +399,125 @@ class GetConversationHistoryTool(BaseTool):
                       to_date: Optional[str] = None, role: Optional[str] = None, **kwargs) -> ToolResult:
         try:
             from app.db import SessionLocal
-            from app.models.tables import AgentSession, ConversationMessage
+            from app.models.tables import ConversationMessage
             from sqlmodel import select
             from uuid import UUID
-            from datetime import datetime, timezone
+            from datetime import datetime, timezone, timedelta
             import dateutil.parser
+            from sqlalchemy import or_
             
             session_id = getattr(self._ctx, "session_id", None)
             if not session_id:
                 return ToolResult(ok=True, output="No session attached to this run.")
-            
-            async with SessionLocal() as db:
-                res = await db.exec(select(AgentSession).where(AgentSession.id == UUID(str(session_id))))
-                session = res.first()
-                message_res = await db.exec(
-                    select(ConversationMessage)
-                    .where(ConversationMessage.session_id == UUID(str(session_id)))
-                    .order_by(ConversationMessage.created_at, ConversationMessage.id)
-                )
-                message_rows = message_res.all()
-            
-            if not session:
-                return ToolResult(ok=True, output="Session not found.")
-            
-            history = [
-                {"role": msg.role, "content": msg.content, "timestamp": msg.created_at.isoformat()}
-                for msg in message_rows
-            ]
-            if not history:
-                return ToolResult(ok=True, output="No conversation history yet.")
-            
-            # Apply filters
-            filtered = history
-            
-            # Filter by date range
-            if from_date:
+
+            if not 1 <= last_n <= 100:
+                return ToolResult(ok=False, error="last_n must be between 1 and 100.")
+            if role not in (None, "user", "assistant"):
+                return ToolResult(ok=False, error="role must be 'user' or 'assistant'.")
+
+            def parse_bound(value: str | None, *, upper: bool = False):
+                if value is None:
+                    return None, False
                 try:
-                    from_dt = dateutil.parser.parse(from_date)
-                    filtered = [
-                        msg for msg in filtered 
-                        if msg.get("timestamp") and dateutil.parser.parse(msg["timestamp"]) >= from_dt
-                    ]
-                except Exception as e:
-                    return ToolResult(ok=False, error=f"Invalid from_date format: {e}")
-            
-            if to_date:
-                try:
-                    to_dt = dateutil.parser.parse(to_date)
-                    filtered = [
-                        msg for msg in filtered 
-                        if msg.get("timestamp") and dateutil.parser.parse(msg["timestamp"]) <= to_dt
-                    ]
-                except Exception as e:
-                    return ToolResult(ok=False, error=f"Invalid to_date format: {e}")
-            
-            # Filter by role
-            if role:
-                filtered = [msg for msg in filtered if msg.get("role") == role]
-            
-            if not filtered:
-                return ToolResult(ok=True, output="No messages match the specified filters.")
-            
-            # Get last N messages after filtering
-            recent = filtered[-last_n:] if last_n > 0 else filtered
-            
-            if not recent:
-                return ToolResult(ok=True, output="No messages in the specified range.")
-            
-            # Format as readable conversation with timestamps
-            lines = []
-            for msg in recent:
-                role_str = msg.get("role", "unknown")
-                content = msg.get("content", "")
-                timestamp = msg.get("timestamp", "")
-                
-                if timestamp:
-                    lines.append(f"[{timestamp}] [{role_str.upper()}] {content}")
+                    parsed = dateutil.parser.isoparse(value)
+                except (TypeError, ValueError, OverflowError):
+                    raise ValueError(f"Invalid {'to_date' if upper else 'from_date'}; use an ISO-8601 date or timestamp.")
+                date_only = len(value.strip()) == 10
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                parsed = parsed.astimezone(timezone.utc)
+                if upper and date_only:
+                    return parsed + timedelta(days=1), True
+                return parsed, False
+
+            from_dt, _ = parse_bound(from_date)
+            to_dt, to_date_only = parse_bound(to_date, upper=True)
+            if from_dt is not None and to_dt is not None and from_dt >= to_dt:
+                return ToolResult(ok=False, error="from_date must be earlier than to_date.")
+            cache_args = json.dumps(
+                {"last_n": last_n, "from_date": from_date, "to_date": to_date, "role": role},
+                sort_keys=True, separators=(",", ":"),
+            )
+            digest = hashlib.sha256(cache_args.encode("utf-8")).hexdigest()
+            session_key = str(UUID(str(session_id)))
+            cache_value_key = None
+            redis_client = None
+            try:
+                from app.redis_client import get_redis, conversation_history_version
+                redis_client = await asyncio.wait_for(get_redis(), timeout=0.2)
+                if redis_client:
+                    version = await asyncio.wait_for(
+                        conversation_history_version(redis_client, session_key), timeout=0.2
+                    )
+                    cache_value_key = f"history:result:{session_key}:{version}:{digest}"
+                    cached = await asyncio.wait_for(redis_client.get(cache_value_key), timeout=0.2)
+                    if cached is not None:
+                        return ToolResult(ok=True, output=cached)
+                    # build_context already loaded this recent transcript from Postgres;
+                    # reuse it for the first history lookup when it fully covers the request.
+                    if from_date is None and to_date is None:
+                        snapshot_key = f"history:recent:{session_key}:{version}"
+                        snapshot = await asyncio.wait_for(redis_client.get(snapshot_key), timeout=0.2)
+                        if snapshot is not None:
+                            snapshot_rows = json.loads(snapshot)
+                            if role:
+                                snapshot_rows = [row for row in snapshot_rows if row.get("role") == role]
+                            if len(snapshot_rows) >= last_n:
+                                output = "\n\n".join(
+                                    f"[{row['timestamp']}] [{row['role'].upper()}] {row['content']}"
+                                    for row in snapshot_rows[-last_n:]
+                                )
+                                if len(output) > 16000:
+                                    output = output[:16000] + "\n\n[History output truncated at 16000 characters.]"
+                                await asyncio.wait_for(
+                                    redis_client.set(cache_value_key, output, ex=30), timeout=0.2
+                                )
+                                return ToolResult(ok=True, output=output)
+            except Exception as cache_exc:
+                log.debug("Conversation history cache read failed: %s", cache_exc)
+                redis_client = None
+                cache_value_key = None
+
+            query = select(ConversationMessage).where(
+                ConversationMessage.session_id == UUID(session_key)
+            )
+            current_run_id = getattr(self._ctx, "run_id", None)
+            if current_run_id:
+                query = query.where(or_(
+                    ConversationMessage.run_id.is_(None),
+                    ConversationMessage.run_id != UUID(str(current_run_id)),
+                ))
+            if from_dt is not None:
+                query = query.where(ConversationMessage.created_at >= from_dt)
+            if to_dt is not None:
+                if to_date_only:
+                    query = query.where(ConversationMessage.created_at < to_dt)
                 else:
-                    lines.append(f"[{role_str.upper()}] {content}")
-            
-            return ToolResult(ok=True, output="\n\n".join(lines))
+                    query = query.where(ConversationMessage.created_at <= to_dt)
+            if role:
+                query = query.where(ConversationMessage.role == role)
+            query = query.order_by(
+                ConversationMessage.created_at.desc(), ConversationMessage.id.desc()
+            ).limit(last_n)
+            async with SessionLocal() as db:
+                message_res = await db.exec(query)
+                message_rows = list(reversed(message_res.all()))
+
+            if not message_rows:
+                output = "No messages match the specified filters."
+            else:
+                output = "\n\n".join(
+                    f"[{msg.created_at.isoformat()}] [{msg.role.upper()}] {msg.content}"
+                    for msg in message_rows
+                )
+                if len(output) > 16000:
+                    output = output[:16000] + "\n\n[History output truncated at 16000 characters.]"
+            if redis_client and cache_value_key:
+                try:
+                    await asyncio.wait_for(redis_client.set(cache_value_key, output, ex=30), timeout=0.2)
+                except Exception as cache_exc:
+                    log.debug("Conversation history cache write failed: %s", cache_exc)
+            return ToolResult(ok=True, output=output)
         except Exception as exc:
             log.error("get_conversation_history failed: %s", exc)
             return ToolResult(ok=False, error=f"Could not retrieve conversation history: {exc}")

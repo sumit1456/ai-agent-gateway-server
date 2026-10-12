@@ -17,7 +17,7 @@ def extract_json(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, user: str,
-                        attempts: int = 3) -> BaseModel:
+                        attempts: int = 3, prior_messages: list | None = None) -> BaseModel:
     """
     Ask the model for output matching `schema`.
     1) native structured output (tool calling) -> on parse error, retry with the error appended
@@ -30,7 +30,7 @@ async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, 
     log.info(f"🎯 [LLM/{role.upper()}] Structured call for schema: {schema.__name__}")
     start_time = time.time()
     
-    messages = [SystemMessage(content=system), HumanMessage(content=user)]
+    messages = [SystemMessage(content=system), *(prior_messages or []), HumanMessage(content=user)]
     log.info(f"📊 [LLM/{role.upper()}] System prompt: {len(system)} chars, User prompt: {len(user)} chars")
     trace.log_custom(f"Structured call - role={role}, schema={schema.__name__}")
     
@@ -62,12 +62,12 @@ async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, 
         log.warning(f"❌ [LLM/{role.upper()}] Structured output failed ({exc}); falling back to plain JSON")
         trace.log_error(f"Structured output failed: {exc}, falling back to plain JSON")
     
-    return await _plain_json(ctx, role, schema, system, user, attempts)
+    return await _plain_json(ctx, role, schema, system, user, attempts, prior_messages)
 
-async def _plain_json(ctx, role, schema, system, user, attempts):
+async def _plain_json(ctx, role, schema, system, user, attempts, prior_messages=None):
     schema_txt = json.dumps(schema.model_json_schema())
     sys2 = f"{system}\n\nReply with ONLY a JSON object matching this JSON Schema, no other text:\n{schema_txt}"
-    messages = [SystemMessage(content=sys2), HumanMessage(content=user)]
+    messages = [SystemMessage(content=sys2), *(prior_messages or []), HumanMessage(content=user)]
     last = ""
     for _ in range(attempts):
         msg = await retry_async(lambda: ctx.llm(role).ainvoke(messages))

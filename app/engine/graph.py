@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, END
 from app.engine.nodes import (router_node, direct_node, planner_node,
-                              executor_node, reviewer_node, finalize_node)
+                              executor_node, controller_node, reviewer_node, finalize_node)
 from app.engine.types import RunState
 
 def build_graph():
@@ -12,6 +12,7 @@ def build_graph():
     workflow.add_node("direct", direct_node)
     workflow.add_node("planner", planner_node)
     workflow.add_node("executor", executor_node)
+    workflow.add_node("controller", controller_node)
     workflow.add_node("reviewer", reviewer_node)
     workflow.add_node("finalize", finalize_node)
     
@@ -34,49 +35,35 @@ def build_graph():
     # Add edge from planner to executor
     workflow.add_edge("planner", "executor")
     
-    # Add conditional edges from executor
-    def executor_router(state):
-        steps = state.get("steps", [])
-        if not steps:
-            # No steps planned - this shouldn't happen, but route to reviewer as safety
-            return "reviewer"
-        
-        # Check if all steps are done
-        all_done = all(s.get("status") == "done" for s in steps)
-        if all_done:
-            return "reviewer"
-        
-        # Check if there are any ready steps to execute
-        pending_or_running = any(s.get("status") in ["pending", "running"] for s in steps)
-        if pending_or_running:
-            return "executor"  # Continue executing
-        
-        # All steps are either "done" or "failed" - move to reviewer
-        return "reviewer"
-    
+    # Execution no longer forces a fixed reviewer/finalizer chain. The typed
+    # controller selects and validates the next workflow action from run state.
+    workflow.add_edge("executor", "controller")
+
+    def controller_router(state):
+        stop_reason = state.get("stop_reason")
+        if stop_reason in {"timeout", "budget", "cancelled", "unrecoverable"}:
+            return stop_reason
+        return state.get("controller_action", "finalize")
+
     workflow.add_conditional_edges(
-        "executor",
-        executor_router,
+        "controller",
+        controller_router,
         {
-            "executor": "executor",
-            "reviewer": "reviewer",
-        }
-    )
-    
-    # Add conditional edges from reviewer
-    workflow.add_conditional_edges(
-        "reviewer",
-        lambda state: state.get("stop_reason") if state.get("stop_reason") else ("planner" if state.get("pending_replan") else "finalize"),
-        {
-            "planner": "planner",
+            "execute": "executor",
+            "verify": "reviewer",
+            "replan": "planner",
+            "ask_user": "finalize",
             "finalize": "finalize",
-            "done": END,
-            "unrecoverable": END,
             "timeout": END,
             "budget": END,
             "cancelled": END,
+            "unrecoverable": END,
         }
     )
+    
+    # Review reports its findings to the controller, which chooses whether to
+    # execute a retry, replan, ask the user, or finalize.
+    workflow.add_edge("reviewer", "controller")
     
     # Add edge from finalize to end
     workflow.add_edge("finalize", END)
