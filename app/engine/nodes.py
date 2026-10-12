@@ -122,10 +122,10 @@ async def direct_node(state: RunState, config: RunnableConfig) -> dict:
         ("CURRENT USER MESSAGE", state["goal"]),
         ("SHARED TASK LIST", task_ledger(state)),
     ], context_char_budget(ctx, 13000))
-    # Combine tool names with kb_search if knowledge base is available
+    # Combine tool names with semantic_search if a knowledge base is available
     available_tools = list(ctx.tools.names())
     if ctx.kb_namespaces:
-        available_tools.append("kb_search")
+        available_tools.append("semantic_search")
     
     log.info(f"🔧 [DIRECT] Tools available for use: {available_tools}")
     trace.log_custom(f"Available tools: {available_tools}")

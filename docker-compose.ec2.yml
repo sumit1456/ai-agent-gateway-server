@@ -1,0 +1,40 @@
+services:
+  backend:
+    image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME in .env}/ai-agent-gateway-server:${BACKEND_IMAGE_TAG:?Set BACKEND_IMAGE_TAG in .env}
+    restart: unless-stopped
+    environment:
+      PORT: 8000
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      REDIS_URL: ${REDIS_URL:-}
+      REDIS_SSL: ${REDIS_SSL:-false}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      PINECONE_API_KEY: ${PINECONE_API_KEY:-}
+      PINECONE_INDEX_HOST: ${PINECONE_INDEX_HOST:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nvidia/nv-embedqa-e5-v5}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      RERANK_MODEL: ${RERANK_MODEL:-bge-reranker-v2-m3}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  frontend:
+    image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME in .env}/ai-agent-gateway-ui:${FRONTEND_IMAGE_TAG:?Set FRONTEND_IMAGE_TAG in .env}
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    depends_on:
+      backend:
+        condition: service_healthy

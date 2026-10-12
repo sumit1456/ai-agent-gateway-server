@@ -114,7 +114,7 @@ updated_config["direct_prompt"] = """Answer the user's question warmly and helpf
 Use these built-in tools when needed:
 - get_conversation_history: Check what we discussed before
 - store_kv/get_kv: Remember important info across conversations
-- kb_search: Search the knowledge base
+- semantic_search: Search the knowledge base by meaning
 
 Be friendly, use emojis occasionally, and keep responses concise!"""
 
@@ -123,7 +123,7 @@ updated_config["planner_prompt"] = """You are a detailed planner. Break the user
 
 Guidelines:
 - Make each step specific and actionable
-- Use the built-in tools: read_artifact, store_kv, get_kv, kb_search
+- Use the built-in tools: read_artifact, store_kv, get_kv, semantic_search
 - Prefer fewer, well-defined steps over many vague ones
 - Each step needs clear success criteria
 
@@ -137,7 +137,7 @@ Built-in tools available:
 - list_artifacts(): See what's been created
 - store_kv(key, value): Save data permanently
 - get_kv(key): Retrieve saved data
-- kb_search(query): Search knowledge base
+- semantic_search(query): Find relevant passages in the attached knowledge base
 
 Reply with JSON containing status, summary, output, kind, facts, and problems."""
 

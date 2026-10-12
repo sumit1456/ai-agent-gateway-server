@@ -17,27 +17,27 @@ def _node(node_id: str, name: str, role: str, instructions: str, input_mapping=N
 SIMPLE = {
     "schema_version": 1, "start_node": "plan",
     "nodes": [
-        _node("plan", "Plan", "planner", "Break the request into a concise, actionable plan. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task; otherwise do not retrieve it."),
-        _node("execute", "Execute", "executor", "Complete the task using the request and plan. Call a tool only when the plan requires it and the tool is assigned to this step.", {"request": "$.request", "plan": "$.steps.plan.output"}),
+        _node("plan", "Plan", "planner", "Break the request into a concise, actionable plan. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless the request needs it."),
+        _node("execute", "Execute", "executor", "Complete the task using the request and plan. Call an assigned tool only when the plan requires it.", {"request": "$.request", "plan": "$.steps.plan.output"}),
         _node("finalize", "Finalize", "finalizer", "Present the completed result clearly.", {"request": "$.request", "work": "$.steps.execute.output"}),
     ],
     "edges": [{"from": "plan", "to": "execute"}, {"from": "execute", "to": "finalize"}],
     "limits": {"max_steps": 12, "max_retries_per_step": 1},
 }
-SIMPLE["nodes"][1]["tools"] = ["get_conversation_history"]
+SIMPLE["nodes"][1]["tools"] = ["get_conversation_history", "semantic_search"]
 
 REVIEWED = {
     "schema_version": 1, "start_node": "plan",
     "nodes": [
-        _node("plan", "Plan", "planner", "Break the request into a concise, actionable plan. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task; otherwise do not retrieve it."),
-        _node("execute", "Execute", "executor", "Complete the task using the request and plan. Call a tool only when the plan requires it and the tool is assigned to this step.", {"request": "$.request", "plan": "$.steps.plan.output"}),
+        _node("plan", "Plan", "planner", "Break the request into a concise, actionable plan. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless the request needs it."),
+        _node("execute", "Execute", "executor", "Complete the task using the request and plan. Call an assigned tool only when the plan requires it.", {"request": "$.request", "plan": "$.steps.plan.output"}),
         _node("review", "Review", "reviewer", "Review the work. Return a JSON object with passed (boolean) and feedback (string).", {"request": "$.request", "work": "$.steps.execute.output"}, {"passed": "boolean", "feedback": "string"}),
         _node("finalize", "Finalize", "finalizer", "Present the reviewed result clearly.", {"request": "$.request", "work": "$.steps.execute.output", "review": "$.steps.review.output"}),
     ],
     "edges": [{"from": "plan", "to": "execute"}, {"from": "execute", "to": "review"}, {"from": "review", "to": "finalize"}],
     "limits": {"max_steps": 16, "max_retries_per_step": 1},
 }
-REVIEWED["nodes"][1]["tools"] = ["get_conversation_history"]
+REVIEWED["nodes"][1]["tools"] = ["get_conversation_history", "semantic_search"]
 
 VIDEO_BLOG = {
     "schema_version": 1, "start_node": "transcript",
@@ -59,7 +59,7 @@ ADAPTIVE = {
     "nodes": [
         _node("controller", "Choose the next role", "controller", "You control this workflow. Choose exactly one value from the allowed_next list in your input. On the first call choose direct for simple requests or plan for multi-step work. After a plan choose execute. After execution choose review when verification is useful, otherwise finalize. After review choose finalize, or execute to revise. Return JSON with the key next.", {"request": "$.request", "completed_steps": "$.steps"}, {"next": "string"}),
         _node("direct", "Answer directly", "direct", "Answer the request directly.", {"request": "$.request"}),
-        _node("plan", "Plan", "planner", "Create an actionable plan using recent conversation context. If older session history is needed, explicitly assign get_conversation_history to an executor task; otherwise do not retrieve it.", {"request": "$.request", "completed_steps": "$.steps"}),
+        _node("plan", "Plan", "planner", "Create an actionable plan using recent conversation context. If older session history is needed, explicitly assign get_conversation_history to an executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless the request needs it.", {"request": "$.request", "completed_steps": "$.steps"}),
         _node("execute", "Execute", "executor", "Carry out the plan, incorporating any review feedback. Call a tool only when the plan requires it and the tool is assigned to this step.", {"request": "$.request", "completed_steps": "$.steps"}),
         _node("review", "Review", "reviewer", "Check the latest work against the request. Return JSON with passed (boolean) and feedback (string).", {"request": "$.request", "completed_steps": "$.steps"}, {"passed": "boolean", "feedback": "string"}),
         _node("finalize", "Finalize", "finalizer", "Present the final result using the completed work and review findings.", {"request": "$.request", "completed_steps": "$.steps"}),
@@ -77,8 +77,8 @@ ADAPTIVE = {
     ],
     "limits": {"max_steps": 16, "max_retries_per_step": 1},
 }
-ADAPTIVE["nodes"][2]["tools"] = ["get_conversation_history"]
-ADAPTIVE["nodes"][1]["tools"] = ["get_conversation_history"]
+ADAPTIVE["nodes"][2]["tools"] = ["get_conversation_history", "semantic_search"]
+ADAPTIVE["nodes"][1]["tools"] = ["get_conversation_history", "semantic_search"]
 ADAPTIVE["nodes"][0]["max_attempts"] = 6
 ADAPTIVE["nodes"][2]["max_attempts"] = 3
 ADAPTIVE["nodes"][3]["max_attempts"] = 4
@@ -95,9 +95,9 @@ DYNAMIC = {
             {"request": "$.request"}, {"next": "string"},
         ),
         _node("direct", "Answer directly", "direct", "Answer the request directly and use only tools assigned to this step."),
-        _node("plan", "Plan the work", "planner", "Create a concise actionable plan. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task; otherwise do not retrieve it."),
+        _node("plan", "Plan the work", "planner", "Create a concise actionable plan. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless the request needs it."),
         _node("execute", "Execute the plan", "executor", "Complete the planned task, calling only tools assigned to this step when the plan requires them.", {"request": "$.request", "plan": "$.steps.plan.output"}),
-        _node("review_plan", "Plan work for review", "planner", "Create a concise actionable plan for a task that benefits from verification. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task; otherwise do not retrieve it."),
+        _node("review_plan", "Plan work for review", "planner", "Create a concise actionable plan for a task that benefits from verification. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless the request needs it."),
         _node("review_execute", "Execute reviewed work", "executor", "Complete the planned task, calling only tools assigned to this step when the plan requires them.", {"request": "$.request", "plan": "$.steps.review_plan.output"}),
         _node("review", "Review the result", "reviewer", "Check the completed work against the request. Return JSON with passed (boolean) and feedback (string).", {"request": "$.request", "work": "$.steps.review_execute.output"}, {"passed": "boolean", "feedback": "string"}),
         _node("finalize", "Present the result", "finalizer", "Present the result from the selected path clearly.", {"request": "$.request", "completed_steps": "$.steps"}),
@@ -115,9 +115,9 @@ DYNAMIC = {
     ],
     "limits": {"max_steps": 12, "max_retries_per_step": 1},
 }
-DYNAMIC["nodes"][1]["tools"] = ["get_conversation_history"]
-DYNAMIC["nodes"][3]["tools"] = ["get_conversation_history"]
-DYNAMIC["nodes"][5]["tools"] = ["get_conversation_history"]
+DYNAMIC["nodes"][1]["tools"] = ["get_conversation_history", "semantic_search"]
+DYNAMIC["nodes"][3]["tools"] = ["get_conversation_history", "semantic_search"]
+DYNAMIC["nodes"][5]["tools"] = ["get_conversation_history", "semantic_search"]
 
 PRESETS = [
     {"id": "simple", "name": "Plan → Execute → Finalize", "description": "A straightforward workflow for general multi-step tasks.", "definition": SIMPLE},

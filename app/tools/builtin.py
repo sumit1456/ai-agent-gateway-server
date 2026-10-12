@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 class ReadArtifactInput(BaseModel):
     artifact_id: str = Field(..., description="The ID of the artifact to read (e.g., 'a1', 'a2')")
 
-class KBSearchInput(BaseModel):
+class SemanticSearchInput(BaseModel):
     query: str = Field(..., description="The search query to find relevant information")
     top_k: int = Field(default=5, description="Number of top results to return")
 
@@ -116,9 +116,9 @@ class ListArtifactsTool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
-# kb_search
+# semantic_search
 # ---------------------------------------------------------------------------
-class KBSearchTool(BaseTool):
+class SemanticSearchTool(BaseTool):
     """Semantic search over the knowledge bases attached to this agent."""
 
     def __init__(self, ctx: "RunContext"):
@@ -126,7 +126,7 @@ class KBSearchTool(BaseTool):
 
     @property
     def name(self) -> str:
-        return "kb_search"
+        return "semantic_search"
 
     @property
     def description(self) -> str:
@@ -137,7 +137,7 @@ class KBSearchTool(BaseTool):
 
     @property
     def input_schema(self) -> type[BaseModel]:
-        return KBSearchInput
+        return SemanticSearchInput
 
     async def _execute(self, query: str, top_k: int = 5, **kwargs) -> ToolResult:
         if not self._ctx.retriever or not self._ctx.kb_namespaces:
@@ -157,7 +157,7 @@ class KBSearchTool(BaseTool):
             ]
             return ToolResult(ok=True, output="\n\n---\n\n".join(lines))
         except Exception as exc:
-            log.error("kb_search failed: %s", exc)
+            log.error("semantic_search failed: %s", exc)
             return ToolResult(ok=False, error=f"Knowledge base search failed: {exc}")
 
 
@@ -598,5 +598,5 @@ def build_builtin_tools(ctx: "RunContext") -> list[BaseTool]:
     if ctx.retriever and getattr(ctx, "conversation_namespace", None) and getattr(ctx, "session_id", None):
         tools.append(SearchConversationMemoryTool(ctx))
     if ctx.retriever and ctx.kb_namespaces:
-        tools.append(KBSearchTool(ctx))
+        tools.append(SemanticSearchTool(ctx))
     return tools

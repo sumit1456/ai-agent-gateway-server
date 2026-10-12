@@ -228,6 +228,10 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
         try:
             available = set(ctx.tools.names())
             requested = node.get("tools") or []
+            # Knowledge search is an optional workflow capability: presets may
+            # include it, but steps should run normally when no KB is attached.
+            if not ctx.kb_namespaces:
+                requested = [name for name in requested if name != "semantic_search"]
             unknown = set(requested) - available
             if unknown:
                 raise ValueError(f"Step {current} requests unavailable tools: {', '.join(sorted(unknown))}")

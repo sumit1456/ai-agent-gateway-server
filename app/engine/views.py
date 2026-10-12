@@ -162,7 +162,7 @@ def build_view(role: str, state, ctx, step=None, wave=None, kb_text: str | None 
             ("SHARED TASK LIST", task_ledger(state)),
             ("VARIABLES", variables),
             ("AVAILABLE TOOLS", tools or "(none)"),
-            ("KNOWLEDGE BASE", "available (use kb_queries / kb_search)" if ctx.kb_namespaces else "not available"),
+            ("KNOWLEDGE BASE", "available (use kb_queries / semantic_search)" if ctx.kb_namespaces else "not available"),
             ("REPLAN REASON", state.get("replan_reason", "")),
             ("DEAD ENDS (do not repeat)", "\n".join(f"- {d}" for d in state.get("dead_ends", []))),
             ("FACTS", _facts(state)),
@@ -170,7 +170,7 @@ def build_view(role: str, state, ctx, step=None, wave=None, kb_text: str | None 
         return assemble(sections, context_char_budget(ctx, BUDGET["planner"]))
 
     if role == "executor":
-        knowledge = kb_text if kb_text else ("no relevant results found; try kb_search with a different query"
+        knowledge = kb_text if kb_text else ("no relevant results found; try semantic_search with a different query"
                                               if step.get("kb_queries") else "")
         sections = [
             ("OVERALL GOAL", state["goal"]),

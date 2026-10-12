@@ -27,7 +27,7 @@ async def get_default_prompts():
         "builtin_tools": [
             "read_artifact", "list_artifacts", "remember_fact",
             "get_session_memory", "store_kv", "get_kv",
-            "get_conversation_history", "kb_search"
+            "get_conversation_history", "semantic_search"
         ],
         "note": "Role presets and additive instructions are optional. Core role duties remain active unless an advanced full prompt override is supplied. Built-in tools are always available to agents."
     }

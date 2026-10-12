@@ -37,7 +37,7 @@ async def list_builtin_tools():
     Users can see what tools are available but cannot disable them.
     """
     from app.tools.builtin import (
-        ReadArtifactTool, ListArtifactsTool, KBSearchTool, RememberFactTool,
+        ReadArtifactTool, ListArtifactsTool, SemanticSearchTool, RememberFactTool,
         GetSessionMemoryTool, StoreKVTool, GetKVTool, GetConversationHistoryTool
     )
     
@@ -100,8 +100,8 @@ async def list_builtin_tools():
             "requires": "Pinecone configured through an attached knowledge base"
         },
         {
-            "name": "kb_search",
-            "description": "Search the knowledge base(s) attached to this agent for relevant information.",
+            "name": "semantic_search",
+            "description": "Find relevant passages by meaning in the knowledge base(s) attached to this agent.",
             "category": "knowledge",
             "always_available": False,
             "requires": "Knowledge base attached to agent"
@@ -111,7 +111,7 @@ async def list_builtin_tools():
     return {
         "builtin_tools": tools_info,
         "total_count": len(tools_info),
-        "note": "These tools are automatically available to all agents and cannot be disabled. They enable memory, persistence, and knowledge retrieval capabilities."
+        "note": "Tool availability depends on the agent workflow and attached resources. Knowledge search requires an attached knowledge base."
     }
 
 

@@ -140,7 +140,7 @@ async def run_step(ctx, state, step) -> StepResult:
     view = build_view("executor", state, ctx, step=step, kb_text=kb_text)
     names = set(step.get("tools", [])) | {"read_artifact"}
     if ctx.kb_namespaces:
-        names.add("kb_search")
+        names.add("semantic_search")
     executor_prompt = get_prompt(ctx.config, "executor")
     text, _errors = await run_tool_loop(ctx, f"{ctx.persona}\n\n{executor_prompt}", view, sorted(names))
     return await parse_step_result(ctx, text)

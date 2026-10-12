@@ -25,7 +25,7 @@ flowchart TD
 
     O[Document ingestion] --> P[Chunk and embed]
     P --> Q[Pinecone KB namespace]
-    I -. optional kb_queries / kb_search .-> Q
+    I -. optional kb_queries / semantic_search .-> Q
 ```
 
 The engine has two execution routes: a direct answer/tool route and a plan/execute/review/finalize route. Both are selected by the router. Conversation persistence and knowledge-base retrieval are separate systems: conversation turns are stored in Postgres; uploaded knowledge documents are embedded into Pinecone.
@@ -113,7 +113,7 @@ Limits include maximum steps, parallel steps, graph iterations, tool turns, toke
 
 ## 4. Tools and intermediate data
 
-Built-in tools include artifact read/list, knowledge search, session fact memory, key/value storage, and conversation-history lookup. Configured user tools are wrapped as webhook or client tools. The executor exposes the tools assigned to that plan step plus `read_artifact`; it adds `kb_search` when a KB retriever is available.
+Built-in tools include artifact read/list, semantic knowledge search, session fact memory, key/value storage, and conversation-history lookup. Configured user tools are wrapped as webhook or client tools. The executor exposes tools assigned to its workflow step. `semantic_search` is available when a knowledge base is attached.
 
 Step output is validated as a `StepResult`. `apply_result` stores full output in an in-memory per-run `ArtifactStore`, adds a short summary and facts to graph state, and assigns an artifact ID. The runner persists artifact rows before completing the run. This lets later steps read full prior output without placing every full artifact in every prompt.
 
@@ -124,7 +124,7 @@ Step output is validated as a `StepResult`. `apply_result` stores full output in
 1. A knowledge base is created with a Pinecone index host/key and a namespace.
 2. Document upload records a `KbDocument` and runs `app/knowledge/ingest.py`.
 3. The document is decoded, split into 512-character chunks with 64-character overlap, embedded with the configured NVIDIA embedding model, and upserted to Pinecone. Metadata currently contains `text`, `source`, and `doc_id`.
-4. During an agent run, the planner can declare `kb_queries`; the executor prefetches those queries. The executor can also call `kb_search`.
+4. During an agent run, the planner can declare `kb_queries`; the executor prefetches those queries. A workflow executor can also call `semantic_search` when the workflow assigns it and an attached knowledge base is available.
 5. `KnowledgeRetriever.search` embeds the query, queries each supplied namespace, gathers top matches, and optionally reranks them.
 
 ### Confirmed wiring mismatch
