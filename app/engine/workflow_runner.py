@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -180,15 +181,6 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
         step_input = _resolve_input(node, request, variables, outputs)
         role = node["role"]
         if role in {"planner", "controller", "direct"}:
-            # Planners and controllers need context to plan or route follow-up
-            # turns; direct responders need it to answer conversationally.
-            # Six messages gives at least three complete exchanges when present.
-            recent = (getattr(ctx, "recent_messages", []) or [])[-6:]
-            step_input["recent_history"] = [
-                {"role": item.get("role"), "timestamp": item.get("timestamp"),
-                 "content": item.get("content", "")}
-                for item in recent
-            ]
             # Show only tools that the workflow has explicitly assigned to at
             # least one step. Other steps still receive only their own tools.
             assigned_tool_names = list(dict.fromkeys(
@@ -210,19 +202,14 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
         system = f"{ctx.persona}\n\n{base}\n\nWORKFLOW STEP: {node.get('name', current)}\nThe workflow step instructions and output contract below take precedence over any conflicting role-template format.\n{node['instructions']}\nReturn a JSON object with these keys and value types: {json.dumps(node.get('output_schema') or {'response': 'string'})}."
         if role == "planner":
             system += (
-                "\n\nUse the recent_history supplied in your input to resolve references to earlier turns. "
-                "When the request needs older or date-filtered conversation details beyond that excerpt, "
-                "make the plan explicitly assign get_conversation_history to an executor task, and name "
-                "only tools listed in available_tools. Otherwise leave history retrieval out of the plan."
+                "\n\nPrior conversation messages are not automatically included. If this request depends on earlier turns, "
+                "make the plan assign get_conversation_history to an executor task with only the needed last_n, role, "
+                "or date filters. Use that tool only if it appears in available_tools; do not retrieve history otherwise. "
+                "Name only tools listed in available_tools."
             )
         user = "WORKFLOW STEP INPUT:\n" + json.dumps(step_input, ensure_ascii=False, default=str)
         started = datetime.now(timezone.utc)
         row = WorkflowRunStep(run_id=UUID(run_id), node_id=current, attempt=attempt, status="running", input=step_input, started_at=started)
-        async with SessionLocal() as db:
-            db.add(row)
-            await db.commit()
-            await db.refresh(row)
-            row_id = row.id
         trace.log_node_enter(current.upper(), {"node_id": current, "input_keys": list(step_input)})
         await _publish_run_event(run_id, "workflow_step_started", {"node_id": current, "attempt": attempt, "name": node.get("name", current), "role": role})
         try:
@@ -239,32 +226,40 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
             if tools:
                 text, _ = await run_tool_loop(ctx, system, user, tools, role=role)
             else:
-                response = await ctx.llm(role).ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
+                llm_started = time.perf_counter()
+                response = await trace.measure_async(
+                    "llm_external", f"workflow_step.{current}.{role}.ainvoke",
+                    lambda: ctx.llm(role).ainvoke([SystemMessage(content=system), HumanMessage(content=user)]),
+                )
                 ctx.usage.add_message(role, response)
                 text = _content_to_text(response.content)
+                trace.log_llm_call(role, len(system) + len(user), len(text), int((time.perf_counter() - llm_started) * 1000))
+            reply_started = time.perf_counter()
             output = _parse_output(text, node.get("output_schema") or {})
+            trace.log_timing("reply_processing", f"workflow_step.{current}.parse_output", (time.perf_counter() - reply_started) * 1000)
             finished = datetime.now(timezone.utc)
-            async with SessionLocal() as db:
-                stored = await db.get(WorkflowRunStep, row_id)
-                stored.status = "succeeded"
-                stored.output = output
-                stored.finished_at = finished
-                db.add(stored)
-                await db.commit()
+            row.status = "succeeded"
+            row.output = output
+            row.finished_at = finished
+            # Notify connected clients as soon as the step output exists; the
+            # following Postgres write remains the durable record.
+            await _publish_run_event(run_id, "workflow_step_completed", {"node_id": current, "output": output})
+            async def persist_step_result():
+                async with SessionLocal() as db:
+                    db.add(row)
+                    await db.commit()
+            await trace.measure_async("database", f"workflow_step.{current}.result_insert_commit", persist_step_result)
             outputs[current] = output
             statuses[current] = "succeeded"
             last_output = output
             trace.log_custom(f"Workflow step {current} completed")
-            await _publish_run_event(run_id, "workflow_step_completed", {"node_id": current, "output": output})
         except Exception as exc:
+            row.status = "failed"
+            row.error = str(exc)[:2000]
+            row.finished_at = datetime.now(timezone.utc)
             async with SessionLocal() as db:
-                stored = await db.get(WorkflowRunStep, row_id)
-                if stored:
-                    stored.status = "failed"
-                    stored.error = str(exc)[:2000]
-                    stored.finished_at = datetime.now(timezone.utc)
-                    db.add(stored)
-                    await db.commit()
+                db.add(row)
+                await db.commit()
             await _publish_run_event(run_id, "workflow_step_failed", {"node_id": current, "error": str(exc)[:1000]})
             raise
         previous_node = current

@@ -64,6 +64,8 @@ async def register_tool(
     db.add(tool)
     await db.commit()
     await db.refresh(tool)
+    from app.redis_client import invalidate_agent_execution_configs
+    await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
         "id": str(tool.id),
@@ -187,6 +189,8 @@ async def update_tool(
     db.add(tool)
     await db.commit()
     await db.refresh(tool)
+    from app.redis_client import invalidate_agent_execution_configs
+    await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
         "id": str(tool.id),
@@ -224,6 +228,8 @@ async def delete_tool(
     
     await db.delete(tool)
     await db.commit()
+    from app.redis_client import invalidate_agent_execution_configs
+    await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
         "message": f"Tool {tool_id} deleted successfully"

@@ -124,6 +124,8 @@ async def add_provider(
     db.add(provider_record)
     await db.commit()
     await db.refresh(provider_record)
+    from app.redis_client import invalidate_agent_execution_configs
+    await invalidate_agent_execution_configs(str(current_user.id))
 
     return {
         "message": "Provider API key stored successfully",
@@ -238,6 +240,8 @@ async def update_provider(
     db.add(existing)
     await db.commit()
     await db.refresh(existing)
+    from app.redis_client import invalidate_agent_execution_configs
+    await invalidate_agent_execution_configs(str(current_user.id))
 
     return {
         "message": "Provider updated successfully",
@@ -310,5 +314,7 @@ async def delete_provider(
 
     await db.delete(provider)
     await db.commit()
+    from app.redis_client import invalidate_agent_execution_configs
+    await invalidate_agent_execution_configs(str(current_user.id))
 
     return {"message": f"Provider {provider_id} deleted successfully"}

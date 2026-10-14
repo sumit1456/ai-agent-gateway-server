@@ -16,7 +16,7 @@ import sys
 import os
 
 # Configuration
-API_KEY = "gw_O9DcjkjnplWjdPimCQfCAa90lNv7Xd-sf4pQrYs1-dE"
+API_KEY = "gw_e7Fr03839mz9055IxM7cNBMQN1OD6WOHJoXWdgi2HsM"
 BASE_URL = "http://localhost:8000"
 END_USER_ID = "test_user_123"  # Simulate an end-user
 USE_SSE = os.getenv("USE_SSE", "false").lower() in {"1", "true", "yes"}

@@ -109,6 +109,8 @@ async def create_knowledge_base(
     db.add(kb)
     await db.commit()
     await db.refresh(kb)
+    from app.redis_client import invalidate_agent_execution_configs
+    await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
         "id": str(kb.id),
@@ -275,6 +277,8 @@ async def update_knowledge_base(
     db.add(kb)
     await db.commit()
     await db.refresh(kb)
+    from app.redis_client import invalidate_agent_execution_configs
+    await invalidate_agent_execution_configs(str(current_user.id))
     return {
         "id": str(kb.id),
         "name": kb.name,
@@ -332,6 +336,8 @@ async def delete_knowledge_base(
 
     await db.delete(kb)
     await db.commit()
+    from app.redis_client import invalidate_agent_execution_configs
+    await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
         "message": f"Knowledge base {kb_id} deleted successfully"

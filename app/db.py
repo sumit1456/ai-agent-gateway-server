@@ -33,7 +33,10 @@ async def init_db():
                 "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT",
                 "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary_message_count INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS task_state JSONB NOT NULL DEFAULT '{}'::jsonb",
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS history_version INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE runs ADD COLUMN IF NOT EXISTS state JSONB NOT NULL DEFAULT '{}'::jsonb",
+                "CREATE INDEX IF NOT EXISTS ix_providers_user_provider ON providers (user_id, provider)",
+                "CREATE INDEX IF NOT EXISTS ix_conversation_messages_session_created_id ON conversation_messages (session_id, created_at, id)",
                 # agent_kv is a new table — create_all handles it, but belt-and-suspenders:
                 """
                 CREATE TABLE IF NOT EXISTS agent_kv (

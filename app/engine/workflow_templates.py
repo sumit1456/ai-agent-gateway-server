@@ -17,7 +17,7 @@ def _node(node_id: str, name: str, role: str, instructions: str, input_mapping=N
 SIMPLE = {
     "schema_version": 1, "start_node": "plan",
     "nodes": [
-        _node("plan", "Plan", "planner", "Break the request into a concise, actionable plan. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless the request needs it."),
+        _node("plan", "Plan", "planner", "Break the request into a concise, actionable plan. Prior conversation messages are not automatically included; if the request depends on earlier turns, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless needed."),
         _node("execute", "Execute", "executor", "Complete the task using the request and plan. Call an assigned tool only when the plan requires it.", {"request": "$.request", "plan": "$.steps.plan.output"}),
         _node("finalize", "Finalize", "finalizer", "Present the completed result clearly.", {"request": "$.request", "work": "$.steps.execute.output"}),
     ],
@@ -29,7 +29,7 @@ SIMPLE["nodes"][1]["tools"] = ["get_conversation_history", "semantic_search"]
 REVIEWED = {
     "schema_version": 1, "start_node": "plan",
     "nodes": [
-        _node("plan", "Plan", "planner", "Break the request into a concise, actionable plan. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless the request needs it."),
+        _node("plan", "Plan", "planner", "Break the request into a concise, actionable plan. Prior conversation messages are not automatically included; if the request depends on earlier turns, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless needed."),
         _node("execute", "Execute", "executor", "Complete the task using the request and plan. Call an assigned tool only when the plan requires it.", {"request": "$.request", "plan": "$.steps.plan.output"}),
         _node("review", "Review", "reviewer", "Review the work. Return a JSON object with passed (boolean) and feedback (string).", {"request": "$.request", "work": "$.steps.execute.output"}, {"passed": "boolean", "feedback": "string"}),
         _node("finalize", "Finalize", "finalizer", "Present the reviewed result clearly.", {"request": "$.request", "work": "$.steps.execute.output", "review": "$.steps.review.output"}),
@@ -95,9 +95,9 @@ DYNAMIC = {
             {"request": "$.request"}, {"next": "string"},
         ),
         _node("direct", "Answer directly", "direct", "Answer the request directly and use only tools assigned to this step."),
-        _node("plan", "Plan the work", "planner", "Create a concise actionable plan. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless the request needs it."),
+        _node("plan", "Plan the work", "planner", "Create a concise actionable plan. Prior conversation messages are not automatically included; if the request depends on earlier turns, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless needed."),
         _node("execute", "Execute the plan", "executor", "Complete the planned task, calling only tools assigned to this step when the plan requires them.", {"request": "$.request", "plan": "$.steps.plan.output"}),
-        _node("review_plan", "Plan work for review", "planner", "Create a concise actionable plan for a task that benefits from verification. Use recent conversation context when relevant. If older session history is needed, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless the request needs it."),
+        _node("review_plan", "Plan work for review", "planner", "Create a concise actionable plan for a task that benefits from verification. Prior conversation messages are not automatically included; if the request depends on earlier turns, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless needed."),
         _node("review_execute", "Execute reviewed work", "executor", "Complete the planned task, calling only tools assigned to this step when the plan requires them.", {"request": "$.request", "plan": "$.steps.review_plan.output"}),
         _node("review", "Review the result", "reviewer", "Check the completed work against the request. Return JSON with passed (boolean) and feedback (string).", {"request": "$.request", "work": "$.steps.review_execute.output"}, {"passed": "boolean", "feedback": "string"}),
         _node("finalize", "Present the result", "finalizer", "Present the result from the selected path clearly.", {"request": "$.request", "completed_steps": "$.steps"}),

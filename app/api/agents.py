@@ -86,6 +86,9 @@ async def create_agent(
     db.add(agent)
     await db.commit()
     await db.refresh(agent)
+    from app.redis_client import set_agent_prompt_config, invalidate_agent_execution_configs
+    await set_agent_prompt_config(str(current_user.id), str(agent.id), agent.config or {})
+    await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
         "id": str(agent.id),
@@ -207,6 +210,10 @@ async def update_agent(
     db.add(agent)
     await db.commit()
     await db.refresh(agent)
+    from app.redis_client import invalidate_agent_prompt_config, set_agent_prompt_config, invalidate_agent_execution_configs
+    await invalidate_agent_prompt_config(str(current_user.id), str(agent.id))
+    await set_agent_prompt_config(str(current_user.id), str(agent.id), agent.config or {})
+    await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
         "id": str(agent.id),
@@ -283,6 +290,9 @@ async def delete_agent(
 
     await db.delete(agent)
     await db.commit()
+    from app.redis_client import invalidate_agent_prompt_config, invalidate_agent_execution_configs
+    await invalidate_agent_prompt_config(str(current_user.id), str(agent.id))
+    await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
         "message": f"Agent {agent_id} deleted successfully"

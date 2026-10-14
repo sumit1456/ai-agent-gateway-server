@@ -15,6 +15,7 @@ class TraceLogger:
     def __init__(self, run_id: str):
         self.run_id = run_id
         self.start_time = time.time()
+        self.timings: Dict[str, Dict[str, Any]] = {}
         
         # Create logs directory if it doesn't exist
         log_dir = Path("agent_traces")
@@ -97,6 +98,7 @@ class TraceLogger:
     def log_llm_call(self, role: str, prompt_length: int, response_length: int, duration_ms: int):
         """Log an LLM call."""
         self._write(f"🤖 LLM Call: role={role}, prompt={prompt_length} chars, response={response_length} chars, duration={duration_ms}ms")
+        self.log_timing("llm_reply", role, duration_ms)
     
     def log_llm_messages(self, role: str, messages: list, response: Any = None):
         """Log full LLM conversation - prompts and response."""
@@ -270,6 +272,25 @@ class TraceLogger:
         """Log a custom message."""
         self._write(f"💬 {message}")
     
+    def log_timing(self, category: str, name: str, duration_ms: float, outcome: str = "ok"):
+        """Record a named duration and aggregate totals by category."""
+        duration_ms = round(float(duration_ms), 1)
+        bucket = self.timings.setdefault(category, {"count": 0, "duration_ms": 0.0})
+        bucket["count"] += 1
+        bucket["duration_ms"] += duration_ms
+        self._write(f"TIMING [{category}] {name}: {duration_ms:.1f}ms ({outcome})")
+
+    async def measure_async(self, category: str, name: str, operation):
+        started = time.perf_counter()
+        outcome = "ok"
+        try:
+            return await operation()
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            self.log_timing(category, name, (time.perf_counter() - started) * 1000, outcome)
+
     def finalize(self, status: str, total_tokens: int, duration_ms: int):
         """Write final summary."""
         self._write("\n" + "=" * 80)
@@ -278,6 +299,9 @@ class TraceLogger:
         self._write(f"Status: {status}")
         self._write(f"Total Duration: {duration_ms}ms ({duration_ms/1000:.2f}s)")
         self._write(f"Total Tokens: {total_tokens}")
+        self._write("Timing totals:")
+        for category, values in sorted(self.timings.items()):
+            self._write(f"  {category}: {values['duration_ms']:.1f}ms across {values['count']} operation(s)")
         self._write(f"Trace File: {self.trace_file}")
         self._write("=" * 80)
         

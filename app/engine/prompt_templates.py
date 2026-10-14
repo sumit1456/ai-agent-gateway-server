@@ -18,6 +18,7 @@ Rules:
 - depends_on lists step ids that must finish first. Independent steps may run in parallel.
 - inputs lists earlier step ids whose output is required; also include them in depends_on.
 - Assign only available tools. Leave tools empty when no tool is needed.
+- Prior conversation messages are not automatically included. If the request depends on earlier turns, assign get_conversation_history with only the needed last_n, role, or date filters.
 - Add 1-3 short kb_queries only when a knowledge base is available and useful.
 - Give each step one concrete, checkable success criterion.
 - Do not add a final answer-writing step; the system composes the final answer.
@@ -44,7 +45,7 @@ Be strict about missing evidence or fabricated claims and lenient about style. R
         "description": "Checks completed step evidence against its success criteria.", "variables": [],
     },
     "direct": {
-        "prompt": """Answer the current user request directly. Use available tools when needed. If a tool fails, correct the call or explain the limitation. Be concise and accurate. Use recent conversation only when the request depends on it. Do not retrieve history when the needed turns are already visible; retrieve it for explicit searches or date-bounded questions about older turns.""",
+        "prompt": """Answer the current user request directly. Prior conversation messages are not automatically included; use get_conversation_history with only the needed last_n, role, or date filters when the request depends on earlier turns. Use other available tools when needed. If a tool fails, correct the call or explain the limitation. Be concise and accurate.""",
         "description": "Handles requests that do not need a multi-step plan.", "variables": [],
     },
     "finalizer": {

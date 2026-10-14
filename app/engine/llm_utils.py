@@ -38,7 +38,10 @@ async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, 
         runnable = ctx.llm(role).with_structured_output(schema, include_raw=True)
         for attempt in range(attempts):
             llm_call_start = time.time()
-            out = await retry_async(lambda: runnable.ainvoke(messages))
+            out = await trace.measure_async(
+                "llm_external", f"{role}.structured_attempt_{attempt + 1}",
+                lambda: retry_async(lambda: runnable.ainvoke(messages)),
+            )
             llm_call_duration = int((time.time() - llm_call_start) * 1000)
             
             ctx.usage.add_message(role, out.get("raw"))
@@ -65,12 +68,17 @@ async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, 
     return await _plain_json(ctx, role, schema, system, user, attempts, prior_messages)
 
 async def _plain_json(ctx, role, schema, system, user, attempts, prior_messages=None):
+    from app.engine.trace_logger import get_trace_logger
+    trace = get_trace_logger(ctx.run_id)
     schema_txt = json.dumps(schema.model_json_schema())
     sys2 = f"{system}\n\nReply with ONLY a JSON object matching this JSON Schema, no other text:\n{schema_txt}"
     messages = [SystemMessage(content=sys2), *(prior_messages or []), HumanMessage(content=user)]
     last = ""
-    for _ in range(attempts):
-        msg = await retry_async(lambda: ctx.llm(role).ainvoke(messages))
+    for attempt in range(attempts):
+        msg = await trace.measure_async(
+            "llm_external", f"{role}.plain_json_attempt_{attempt + 1}",
+            lambda: retry_async(lambda: ctx.llm(role).ainvoke(messages)),
+        )
         ctx.usage.add_message(role, msg)
         try:
             return schema.model_validate(extract_json(msg.content))
@@ -136,7 +144,10 @@ async def llm_turn(ctx, role: str, messages: list, tools: list | None = None,
             await _publish_run_event(ctx.run_id, "answer.reset", {})
             emitted = False
 
-    msg = await retry_async(call, on_retry=on_retry)
+    msg = await trace.measure_async(
+        "llm_external", f"{role}.streaming_turn",
+        lambda: retry_async(call, on_retry=on_retry),
+    )
     ctx.usage.add_message(role, msg)
     
     duration = int((time.time() - start_time) * 1000)

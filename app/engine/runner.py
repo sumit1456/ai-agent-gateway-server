@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+import time
 from langchain_core.runnables import RunnableConfig
 from app.engine.context import RUNS, RunContext
 from app.engine.graph import build_graph
@@ -12,7 +13,12 @@ async def _publish_run_event(run_id: str, event_type: str, data: dict) -> None:
     """Publish progress without allowing Redis failures to affect a run."""
     try:
         from app.redis_client import publish_event
-        await publish_event(f"run:{run_id}", event_type, data)
+        from app.engine.trace_logger import _active_traces
+        trace = _active_traces.get(run_id)
+        if trace:
+            await trace.measure_async("redis", f"publish:{event_type}", lambda: publish_event(f"run:{run_id}", event_type, data))
+        else:
+            await publish_event(f"run:{run_id}", event_type, data)
     except Exception as exc:
         log.warning("Failed to publish event for run %s: %s", run_id, exc)
 
@@ -37,11 +43,12 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     from app.tools.registry import ToolRegistry
     from app.knowledge.retriever import KnowledgeRetriever
     from app.db import SessionLocal
-    from sqlmodel import select
-    from app.models.tables import Provider, KnowledgeBase, Tool as ToolRecord, AgentSession, ConversationMessage, Run
+    from app.models.tables import AgentSession
     from app.providers.registry import get_provider
     from app.security import decrypt
-    from sqlalchemy import or_
+    from app.services.run_context_config import load_agent_execution_config
+    import time
+    from app.engine.trace_logger import get_trace_logger
 
     config = AgentConfig(**config_dict)
     vars_dict = variables or {}
@@ -57,9 +64,7 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     user_tools: list = []
     conversation_summary = ""
     recent_messages: list[dict] = []
-    history_snapshot: list[dict] = []
     session_task_state: dict = {}
-    history_truncated = False
     retrieved_memories: list[dict] = []
 
     try:
@@ -67,8 +72,11 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     except (ValueError, TypeError):
         uid = user_id
 
+    trace = get_trace_logger(run_id)
+    context_db_started = time.perf_counter()
     async with SessionLocal() as db:
-        # Load prior complete session context before starting any model calls.
+        # Load only compact session state here. Conversation turns are retrieved
+        # on demand through get_conversation_history.
         if session_id:
             try:
                 session_uuid = UUID(str(session_id))
@@ -76,135 +84,45 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
                 if session:
                     conversation_summary = session.summary or ""
                     session_task_state = session.task_state or {}
-                    msg_res = await db.exec(
-                        select(ConversationMessage)
-                        .where(ConversationMessage.session_id == session_uuid)
-                        .outerjoin(Run, ConversationMessage.run_id == Run.id)
-                        .where(or_(ConversationMessage.run_id.is_(None), Run.status == "done"))
-                        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
-                        .limit(100)
-                    )
-                    prior_rows = msg_res.all()
-                    by_run: dict = {}
-                    legacy_rows = []
-                    for message in prior_rows:
-                        if message.run_id is None:
-                            legacy_rows.append(message)
-                        else:
-                            by_run.setdefault(message.run_id, []).append(message)
-                    complete_runs = [
-                        rows for rows in by_run.values()
-                        if {message.role for message in rows} >= {"user", "assistant"}
-                    ][:5]
-                    selected_rows = [message for rows in complete_runs for message in rows]
-                    if len(complete_runs) < 3:
-                        selected_rows.extend(legacy_rows[: 6 * (3 - len(complete_runs))])
-                    selected_rows.sort(key=lambda message: (message.created_at, str(message.id)))
-                    recent_messages = [
-                        {"role": m.role, "content": m.content, "timestamp": m.created_at.isoformat()}
-                        for m in selected_rows
-                    ]
-                    history_snapshot = recent_messages
-                    # Bound raw transcript context by characters (~4 chars/token).
-                    # Keep the newest messages first, then restore chronological order.
-                    context_budget = 4000
-                    bounded = []
-                    used_chars = 0
-                    for message in reversed(recent_messages):
-                        rendered_size = len(message["content"]) + len(message["timestamp"]) + 24
-                        if used_chars + rendered_size > context_budget:
-                            history_truncated = True
-                            remaining = context_budget - used_chars - len(message["timestamp"]) - 24
-                            if remaining > 200:
-                                bounded.append({**message, "content": message["content"][-remaining:]})
-                            break
-                        bounded.append(message)
-                        used_chars += rendered_size
-                    recent_messages = list(reversed(bounded))
             except (ValueError, TypeError):
                 log.warning("Could not load conversation context for run %s", run_id)
 
-        # 1. Resolve Provider
-        p_res = None
-        try:
-            p_uuid = UUID(str(config.provider_id))
-            p_res = await db.exec(select(Provider).where(Provider.user_id == uid, Provider.id == p_uuid))
-        except (ValueError, TypeError):
-            pass
-        if not p_res:
-            p_res = await db.exec(select(Provider).where(Provider.user_id == uid, Provider.provider == str(config.provider_id)))
-        provider_record = p_res.first() if p_res else None
+        execution_config = await load_agent_execution_config(
+            db,
+            user_id=uid,
+            agent_id=agent_id,
+            provider_ref=str(config.provider_id),
+            knowledge_base_ids=config.knowledge_base_ids,
+            tool_names=config.tools,
+        )
+
+        # Static provider/KB/tool config is read in one query on cache miss.
+        provider_record = execution_config.get("provider")
         if provider_record:
             try:
-                provider_obj = get_provider(provider_record.provider)
-                decrypted_api_key = decrypt(provider_record.api_key_enc)
-                print(f"✓ Resolved provider: {provider_record.provider} (ID: {provider_record.id})")
+                provider_obj = get_provider(provider_record["provider"])
+                decrypted_api_key = decrypt(provider_record["api_key_enc"])
+                print(f"✓ Resolved provider: {provider_record['provider']} (ID: {provider_record['id']})")
                 print(f"✓ API key loaded: {decrypted_api_key[:8]}..." if decrypted_api_key else "✗ No API key")
             except Exception as e:
-                print(f"Error initializing provider {provider_record.provider}: {e}")
+                print(f"Error initializing provider {provider_record.get('provider')}: {e}")
         else:
             print(f"✗ Provider not found for config.provider_id={config.provider_id}, user_id={uid}")
 
-        # 2. Resolve attached Knowledge Bases if any
-        if config.knowledge_base_ids:
-            kb_uuids = []
-            for kbid in config.knowledge_base_ids:
-                try:
-                    kb_uuids.append(UUID(str(kbid)))
-                except (ValueError, TypeError):
-                    pass
-            if kb_uuids:
-                kbs_res = await db.exec(select(KnowledgeBase).where(
-                    KnowledgeBase.user_id == uid,
-                    KnowledgeBase.id.in_(kb_uuids),
-                ))
-                kbs = kbs_res.all()
-                if kbs:
-                    first_kb = kbs[0]
-                    kb_namespaces = [k.namespace for k in kbs]
-                    custom_api_key = decrypt(first_kb.vector_api_key_enc) if first_kb.vector_api_key_enc else None
-                    retriever = KnowledgeRetriever(
-                        api_key=custom_api_key,
-                        index_host=first_kb.vector_index_host,
-                        rerank_model=first_kb.rerank_model
-                    )
-
-        # When the raw recent transcript had to be clipped, supplement it with a
-        # couple of older semantically relevant messages instead of expanding the prompt.
-        if history_truncated and retriever and session_id and agent_id:
-            try:
-                memory_namespace = f"agent-{agent_id}-conversation"
-                memory_matches = await retriever.search(
-                    namespaces=[memory_namespace],
-                    query=input_str,
-                    top_k=5,
-                    final_k=2,
-                    metadata_filter={
-                        "$and": [
-                            {"record_type": {"$eq": "conversation_message"}},
-                            {"session_id": {"$eq": str(session_id)}},
-                            {"user_id": {"$eq": str(uid)}},
-                            {"agent_id": {"$eq": str(agent_id)}},
-                            {"run_id": {"$ne": str(run_id)}},
-                        ]
-                    },
-                )
-                retrieved_memories = [
-                    {"text": item.get("text", ""), **item.get("metadata", {})}
-                    for item in memory_matches
-                ]
-            except Exception as exc:
-                log.info("Session semantic retrieval skipped for run %s: %s", run_id, exc)
-
-        # 3. Load user-defined tools from DB
-        if config.tools:
-            tools_res = await db.exec(
-                select(ToolRecord).where(
-                    ToolRecord.user_id == uid,
-                    ToolRecord.name.in_(config.tools),
-                )
+        knowledge_bases = execution_config.get("knowledge_bases", [])
+        if knowledge_bases:
+            first_kb = knowledge_bases[0]
+            kb_namespaces = [kb["namespace"] for kb in knowledge_bases]
+            custom_api_key = decrypt(first_kb["vector_api_key_enc"]) if first_kb.get("vector_api_key_enc") else None
+            retriever = KnowledgeRetriever(
+                api_key=custom_api_key,
+                index_host=first_kb.get("vector_index_host"),
+                rerank_model=first_kb.get("rerank_model"),
             )
-            user_tools = list(tools_res.all())
+
+        user_tools = execution_config.get("tools", [])
+
+    trace.log_timing("database", "context.load", (time.perf_counter() - context_db_started) * 1000)
 
     temps = {"planner": 0.2, "reviewer": 0.0}
     def factory(role: str):
@@ -252,10 +170,6 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     for tool in build_builtin_tools(ctx):
         registry.register(tool)
 
-    if session_id and history_snapshot:
-        from app.redis_client import prime_recent_conversation_history
-        await prime_recent_conversation_history(str(session_id), history_snapshot)
-
     # 5. Register user-defined tools
     if user_tools:
         _register_user_tools(registry, user_tools)
@@ -271,22 +185,30 @@ def _register_user_tools(registry, tool_records) -> None:
     from app.security import decrypt
     for rec in tool_records:
         try:
-            if rec.kind == "webhook":
-                auth = decrypt(rec.auth_enc) if rec.auth_enc else None
+            if rec["kind"] == "webhook":
+                stored_auth = decrypt(rec["auth_enc"]) if rec.get("auth_enc") and rec.get("auth_cache_wrapped") else rec.get("auth_enc")
+                if stored_auth:
+                    try:
+                        auth = decrypt(stored_auth)
+                    except Exception:
+                        # Existing tool rows may predate encrypted-at-rest storage.
+                        auth = stored_auth
+                else:
+                    auth = None
                 registry.register(WebhookTool(
-                    name=rec.name,
-                    description=rec.description,
-                    endpoint_url=rec.endpoint_url,
+                    name=rec["name"],
+                    description=rec["description"],
+                    endpoint_url=rec["endpoint_url"],
                     auth_enc=auth,
-                    timeout_ms=rec.timeout_ms,
+                    timeout_ms=rec["timeout_ms"],
                 ))
-            elif rec.kind == "client":
-                registry.register(ClientTool(name=rec.name, description=rec.description))
+            elif rec["kind"] == "client":
+                registry.register(ClientTool(name=rec["name"], description=rec["description"]))
         except Exception as exc:
-            print(f"Warning: could not load tool {rec.name!r}: {exc}")
+            print(f"Warning: could not load tool {rec.get('name')!r}: {exc}")
 
 
-async def _compact_session_history(ctx, run_id: str) -> None:
+async def _compact_session_history(ctx, run_id: str, trace_timing: bool = True) -> None:
     """Summarize older turns in batches; keep the newest three turns verbatim."""
     from langchain_core.messages import HumanMessage, SystemMessage
     from app.engine.retry import retry_async
@@ -295,6 +217,11 @@ async def _compact_session_history(ctx, run_id: str) -> None:
     from sqlmodel import select
     from sqlalchemy import func, or_
     from uuid import UUID
+    compact_started = time.perf_counter()
+    trace = None
+    if trace_timing:
+        from app.engine.trace_logger import get_trace_logger
+        trace = get_trace_logger(run_id)
 
     try:
         async with SessionLocal() as db:
@@ -330,7 +257,7 @@ async def _compact_session_history(ctx, run_id: str) -> None:
             f"[{m.created_at.isoformat()}] {m.role.upper()}: {m.content[:1500]}"
             for m in batch
         )
-        response = await retry_async(lambda: ctx.llm("reviewer").ainvoke([
+        compact_call = lambda: retry_async(lambda: ctx.llm("reviewer").ainvoke([
             SystemMessage(content=(
                 "Update a concise memory summary of a user-assistant conversation. "
                 "Preserve durable user preferences, facts, ongoing tasks, and unresolved questions. "
@@ -338,6 +265,10 @@ async def _compact_session_history(ctx, run_id: str) -> None:
             )),
             HumanMessage(content=f"EXISTING SUMMARY:\n{previous_summary}\n\nNEW OLDER MESSAGES:\n{history}"),
         ]))
+        if trace:
+            response = await trace.measure_async("llm_external", "reviewer.history_compaction", compact_call)
+        else:
+            response = await compact_call()
         summary = response.content if isinstance(response.content, str) else str(response.content)
         summary = summary.strip()[:6000]
         ctx.usage.add_message("reviewer", response)
@@ -354,6 +285,13 @@ async def _compact_session_history(ctx, run_id: str) -> None:
                 await db.commit()
     except Exception as exc:
         log.warning("Session history compaction failed for run %s: %s", run_id, exc)
+    finally:
+        if not trace_timing:
+            log.info(
+                "Background session compaction finished for run %s in %.1fms",
+                run_id,
+                (time.perf_counter() - compact_started) * 1000,
+            )
 
 
 async def run_graph(ctx: RunContext, run_id: str) -> None:
@@ -441,7 +379,9 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         })
     finally:
         # Persist artifacts to Postgres before closing
-        await ctx.artifacts.persist(run_id)
+        from app.engine.trace_logger import get_trace_logger, remove_trace_logger
+        trace = get_trace_logger(run_id)
+        await trace.measure_async("database", "artifacts.persist", lambda: ctx.artifacts.persist(run_id))
         
         total_duration = int((time.time() - start_time) * 1000)
         total_tokens = ctx.usage.total
@@ -456,22 +396,10 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         log.info(f"📈 Metrics: {dict(ctx.metrics)}")
         log.info(f"=" * 80)
         
-        # Finalize trace logging
-        from app.engine.trace_logger import get_trace_logger, remove_trace_logger
-        try:
-            trace = get_trace_logger(run_id)
-            trace.finalize(
-                status="success" if not error else "failed",
-                total_tokens=total_tokens,
-                duration_ms=total_duration
-            )
-            remove_trace_logger(run_id)
-        except Exception as trace_exc:
-            log.warning(f"Failed to finalize trace: {trace_exc}")
-        
         # Update Run record in DB
         from app.db import SessionLocal
-        from app.models.tables import Run, ConversationMessage
+        from app.models.tables import AgentSession, Run, ConversationMessage
+        from sqlalchemy import update
         run = None
         try:
             async with SessionLocal() as db:
@@ -486,6 +414,10 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
                         run.state = final_state
                     db.add(run)
                     
+                    session = None
+                    if run.session_id and (final_state.get("steps") or (final_answer and not error)):
+                        session = await db.get(AgentSession, run.session_id)
+
                     if run.session_id and final_answer and not error:
                         db.add(ConversationMessage(
                             session_id=run.session_id,
@@ -493,27 +425,28 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
                             role="assistant",
                             content=final_answer,
                         ))
+                        await db.flush()
+                        await db.execute(
+                            update(AgentSession)
+                            .where(AgentSession.id == run.session_id)
+                            .values(history_version=AgentSession.history_version + 1)
+                            .execution_options(synchronize_session=False)
+                        )
 
-                    if run.session_id and final_state.get("steps"):
-                        from app.models.tables import AgentSession
-                        session = await db.get(AgentSession, run.session_id)
-                        if session:
-                            session.task_state = _task_state_snapshot(
-                                final_state, run_id, "interrupted" if error else "completed"
-                            )
-                            db.add(session)
+                    if session and final_state.get("steps"):
+                        session.task_state = _task_state_snapshot(
+                            final_state, run_id, "interrupted" if error else "completed"
+                        )
+                        db.add(session)
                     
+                    db_commit_started = time.perf_counter()
                     await db.commit()
+                    trace.log_timing("database", "run.final_commit", (time.perf_counter() - db_commit_started) * 1000)
         except Exception as db_exc:
             print(f"Failed to update run record: {db_exc}")
 
-        if run and run.session_id and final_answer and not error:
-            from app.redis_client import invalidate_conversation_history
-            await invalidate_conversation_history(str(run.session_id))
-
         if not error and final_answer:
-            await _index_run_conversation(ctx, run_id)
-            await _compact_session_history(ctx, run_id)
+            await trace.measure_async("vector_index", "conversation.index", lambda: _index_run_conversation(ctx, run_id))
             total_tokens = ctx.usage.total
 
         if not error:
@@ -523,8 +456,21 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
                 "duration_ms": total_duration,
                 "stop_reason": final_stop_reason,
             })
+            # Conversation compaction is maintenance work; let the user see the
+            # completed answer first and update the durable summary afterward.
+            if run and run.session_id and final_answer:
+                spawn(_compact_session_history(ctx, run_id, trace_timing=False))
         
-        await ctx.sink.emit("run.done", {"run_id": run_id})
+        await trace.measure_async("events", "run.done", lambda: ctx.sink.emit("run.done", {"run_id": run_id}))
+        try:
+            trace.finalize(
+                status="success" if not error else "failed",
+                total_tokens=total_tokens,
+                duration_ms=int((time.time() - trace.start_time) * 1000),
+            )
+            remove_trace_logger(run_id)
+        except Exception as trace_exc:
+            log.warning(f"Failed to finalize trace: {trace_exc}")
 
 
 async def execute_run(run_id: str, user_id: str, config_dict: dict,
@@ -533,8 +479,19 @@ async def execute_run(run_id: str, user_id: str, config_dict: dict,
                       session_id: str | None = None,
                       end_user_id: str | None = None) -> None:
     """Entry point for starting a run."""
-    ctx = await build_context(run_id, user_id, config_dict, input_str, variables, 
-                             agent_id=agent_id, session_id=session_id, end_user_id=end_user_id)
+    from app.engine.trace_logger import get_trace_logger
+    trace = get_trace_logger(run_id)
+    try:
+        ctx = await trace.measure_async("setup", "build_context", lambda: build_context(
+            run_id, user_id, config_dict, input_str, variables,
+            agent_id=agent_id, session_id=session_id, end_user_id=end_user_id,
+        ))
+    except Exception as exc:
+        from app.engine.trace_logger import remove_trace_logger
+        trace.log_error(f"Context setup failed: {exc}")
+        trace.finalize(status="failed", total_tokens=0, duration_ms=int((time.time() - trace.start_time) * 1000))
+        remove_trace_logger(run_id)
+        raise
     ctx.input = input_str       # type: ignore[attr-defined]
     ctx.variables = variables or {}  # type: ignore[attr-defined]
     spawn(run_graph(ctx, run_id))
@@ -564,6 +521,7 @@ async def _persist_run_checkpoint(run_id: str, ctx: RunContext, state: dict) -> 
     from app.db import SessionLocal
     from app.models.tables import Run, AgentSession
 
+    started = time.perf_counter()
     try:
         async with SessionLocal() as db:
             run = await db.get(Run, UUID(run_id))
@@ -579,6 +537,9 @@ async def _persist_run_checkpoint(run_id: str, ctx: RunContext, state: dict) -> 
             await db.commit()
     except Exception as exc:
         log.warning("Could not persist checkpoint for run %s: %s", run_id, exc)
+    finally:
+        from app.engine.trace_logger import get_trace_logger
+        get_trace_logger(run_id).log_timing("database", "run.checkpoint", (time.perf_counter() - started) * 1000)
 
 
 async def _index_run_conversation(ctx: RunContext, run_id: str) -> None:

@@ -37,6 +37,7 @@ class ApiKey(SQLModel, table=True):
 
 class Provider(SQLModel, table=True):
     __tablename__ = "providers"
+    __table_args__ = (Index("ix_providers_user_provider", "user_id", "provider"),)
     id: UUID = pk()
     user_id: UUID = Field(foreign_key="users.id", index=True)
     provider: str                                     # "openrouter" | "nvidia"
@@ -148,6 +149,7 @@ class AgentSession(SQLModel, table=True):
     summary: str | None = Field(default=None, nullable=True)
     summary_message_count: int = 0
     task_state: dict = jb()                            # compact resumable session-level work state
+    history_version: int = Field(default=0, nullable=False)
     created_at: datetime = ts()
     updated_at: datetime = ts()
 
@@ -174,7 +176,10 @@ class Run(SQLModel, table=True):
 
 class ConversationMessage(SQLModel, table=True):
     __tablename__ = "conversation_messages"
-    __table_args__ = (Index("ix_conversation_messages_session_created", "session_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_conversation_messages_session_created", "session_id", "created_at"),
+        Index("ix_conversation_messages_session_created_id", "session_id", "created_at", "id"),
+    )
     id: UUID = pk()
     session_id: UUID = Field(foreign_key="sessions.id", index=True, ondelete="CASCADE")
     run_id: UUID | None = Field(default=None, foreign_key="runs.id", index=True, ondelete="SET NULL")

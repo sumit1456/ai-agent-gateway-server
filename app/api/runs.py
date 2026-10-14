@@ -88,7 +88,7 @@ async def list_builtin_tools():
         },
         {
             "name": "get_conversation_history",
-            "description": "Retrieve conversation history from previous runs in this session.",
+            "description": "On demand, retrieve up to 100 prior messages using last_n, optional role, or date filters. History is not automatically loaded into each run.",
             "category": "memory",
             "always_available": True
         },
@@ -233,7 +233,11 @@ async def create_run(
     # Start the run in the background
     # Note: In a real implementation, we would properly handle the agent config
     # For now, we'll use a simplified config
-    agent_cfg = agent.config if isinstance(agent.config, dict) else {}
+    from app.redis_client import get_agent_prompt_config, set_agent_prompt_config
+    agent_cfg = await get_agent_prompt_config(str(current_user.id), str(agent.id))
+    if agent_cfg is None:
+        agent_cfg = agent.config if isinstance(agent.config, dict) else {}
+        await set_agent_prompt_config(str(current_user.id), str(agent.id), agent_cfg)
     workflow_definition = None
     if agent.workflow_version_id:
         workflow_version = await db.get(WorkflowVersion, agent.workflow_version_id)
@@ -307,9 +311,16 @@ async def create_run(
         role="user",
         content=input,
     ))
+    # Advance the durable history cache generation atomically with the message.
+    from sqlalchemy import update
+    await db.flush()
+    await db.execute(
+        update(AgentSession)
+        .where(AgentSession.id == session.id)
+        .values(history_version=AgentSession.history_version + 1)
+        .execution_options(synchronize_session=False)
+    )
     await db.commit()
-    from app.redis_client import invalidate_conversation_history
-    await invalidate_conversation_history(str(session.id))
 
     asyncio.create_task(execute_run(
         run_id=run_id,
@@ -499,8 +510,9 @@ async def stream_run_updates(
     run_id: str,
     current_user: User = Depends(current_user),
     db=Depends(get_db),
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
 ):
-    """Stream authenticated run progress as Server-Sent Events."""
+    """Replay and stream authenticated run events from a Redis Stream."""
     try:
         run_uuid = uuid.UUID(run_id)
     except ValueError:
@@ -523,19 +535,20 @@ async def stream_run_updates(
         )
 
     channel = f"run:{run_id}"
-    pubsub = redis_client.pubsub()
+    cursor_parts = last_event_id.split("-", 1) if last_event_id else []
+    cursor = (
+        last_event_id
+        if len(cursor_parts) == 2 and all(part.isdigit() for part in cursor_parts)
+        else "0-0"
+    )
     try:
-        # Subscribe before taking the final status snapshot. This closes the
-        # gap where a short run could finish between checking its status and
-        # attaching to Redis Pub/Sub.
-        await pubsub.subscribe(channel)
+        # Redis Streams retain events emitted before the client connects.
         result = await db.exec(select(Run).where(
             Run.user_id == current_user.id,
             Run.id == run_uuid,
         ))
         run = result.first()
         if not run:
-            await pubsub.aclose()
             raise HTTPException(status_code=404, detail="Run not found")
         run_status = run.status
         run_result = run.result
@@ -544,8 +557,7 @@ async def stream_run_updates(
     except HTTPException:
         raise
     except Exception as exc:
-        await pubsub.aclose()
-        logger.warning("Could not subscribe to %s: %s", channel, exc)
+        logger.warning("Could not prepare Redis stream %s: %s", channel, exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="SSE streaming is temporarily unavailable. Use the polling endpoint instead.",
@@ -572,35 +584,56 @@ async def stream_run_updates(
             }
             yield f"event: progress_snapshot\ndata: {json.dumps(progress_snapshot)}\n\n"
 
-            if run_status in {"done", "failed", "cancelled"}:
-                event_type = "run_completed" if run_status == "done" else "run_failed"
-                yield f"event: {event_type}\ndata: {json.dumps({'status': run_status, 'result': run_result, 'stop_reason': stop_reason}, default=str)}\n\n"
-                return
-
             loop = asyncio.get_running_loop()
             deadline = loop.time() + 300
-            while loop.time() < deadline:
-                try:
-                    message = await asyncio.wait_for(
-                        pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0),
-                        timeout=2.0,
-                    )
-                    if not message or message.get("type") != "message":
-                        yield ": keepalive\n\n"
+            stream_cursor = cursor
+            terminal = run_status in {"done", "failed", "cancelled"}
+            if terminal:
+                # Replay retained events for completed runs, then send a DB
+                # snapshot as a fallback for older runs or Redis write errors.
+                entries = await redis_client.xrange(channel, min="-", max="+")
+                cursor_tuple = tuple(map(int, cursor.split("-", 1)))
+                saw_terminal_event = False
+                for stream_id, fields in entries:
+                    if tuple(map(int, stream_id.split("-", 1))) <= cursor_tuple:
                         continue
-
                     try:
-                        event = json.loads(message["data"])
+                        event = json.loads(fields.get("event", "{}"))
                     except (TypeError, json.JSONDecodeError):
-                        logger.warning("Ignoring malformed Redis event on %s", channel)
+                        logger.warning("Ignoring malformed Redis stream event on %s", channel)
                         continue
                     event_type = event.get("type", "update")
-                    payload = event.get("data", {})
-                    yield f"event: {event_type}\ndata: {json.dumps(payload, default=str)}\n\n"
-                    if event_type in {"run_completed", "run_failed"}:
-                        break
-                except asyncio.TimeoutError:
+                    yield (
+                        f"id: {stream_id}\nevent: {event_type}\n"
+                        f"data: {json.dumps(event.get('data', {}), default=str)}\n\n"
+                    )
+                    stream_cursor = stream_id
+                    saw_terminal_event = saw_terminal_event or event_type in {"run_completed", "run_failed"}
+                if not saw_terminal_event:
+                    event_type = "run_completed" if run_status == "done" else "run_failed"
+                    yield f"event: {event_type}\ndata: {json.dumps({'status': run_status, 'result': run_result, 'stop_reason': stop_reason}, default=str)}\n\n"
+                return
+
+            while loop.time() < deadline:
+                streams = await redis_client.xread(
+                    {channel: stream_cursor}, count=100, block=1000
+                )
+                if not streams:
                     yield ": keepalive\n\n"
+                    continue
+                for _, entries in streams:
+                    for stream_id, fields in entries:
+                        stream_cursor = stream_id
+                        try:
+                            event = json.loads(fields.get("event", "{}"))
+                        except (TypeError, json.JSONDecodeError):
+                            logger.warning("Ignoring malformed Redis stream event on %s", channel)
+                            continue
+                        event_type = event.get("type", "update")
+                        payload = event.get("data", {})
+                        yield f"id: {stream_id}\nevent: {event_type}\ndata: {json.dumps(payload, default=str)}\n\n"
+                        if event_type in {"run_completed", "run_failed"}:
+                            return
             else:
                 yield f"event: timeout\ndata: {json.dumps({'message': 'Stream timeout after 5 minutes'})}\n\n"
         except asyncio.CancelledError:
@@ -609,14 +642,6 @@ async def stream_run_updates(
             logger.exception("SSE stream failed for %s", channel)
             yield f"event: error\ndata: {json.dumps({'error': 'Stream error'})}\n\n"
         finally:
-            try:
-                await pubsub.unsubscribe(channel)
-            except Exception:
-                logger.debug("Failed to unsubscribe from %s", channel, exc_info=True)
-            try:
-                await pubsub.aclose()
-            except Exception:
-                logger.debug("Failed to close pubsub for %s", channel, exc_info=True)
             logger.info("SSE client disconnected from %s", channel)
 
     return StreamingResponse(

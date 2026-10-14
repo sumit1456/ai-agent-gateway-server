@@ -73,8 +73,14 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
         
         # Execute tools in parallel
         tool_exec_start = time.time()
-        results = await asyncio.gather(*[call_tool(ctx, tc["name"], tc["args"]) for tc in ai.tool_calls])
+        async def measured_tool_call(tool_call):
+            return await trace.measure_async(
+                "tools", tool_call["name"],
+                lambda: call_tool(ctx, tool_call["name"], tool_call["args"]),
+            )
+        results = await asyncio.gather(*[measured_tool_call(tc) for tc in ai.tool_calls])
         tool_exec_duration = int((time.time() - tool_exec_start) * 1000)
+        trace.log_timing("tools", "parallel_batch", tool_exec_duration)
         
         log.info(f"⚡ [TOOL_LOOP] All tools executed in {tool_exec_duration}ms")
         trace.log_custom(f"Tools executed in {tool_exec_duration}ms")

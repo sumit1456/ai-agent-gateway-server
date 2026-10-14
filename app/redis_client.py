@@ -3,6 +3,7 @@ Redis client for pub/sub messaging.
 Used for real-time streaming of agent execution events.
 """
 import asyncio
+import json
 import redis.asyncio as redis
 from typing import Optional
 from app.config import settings
@@ -10,7 +11,8 @@ from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-HISTORY_CACHE_VERSION_TTL_SECONDS = 86400
+AGENT_PROMPT_CONFIG_TTL_SECONDS = 300
+AGENT_EXECUTION_CONFIG_TTL_SECONDS = 480
 
 _redis_client: Optional[redis.Redis] = None
 
@@ -64,10 +66,10 @@ async def close_redis():
 
 async def publish_event(channel: str, event_type: str, data: dict) -> bool:
     """
-    Publish an event to a Redis channel.
+    Append an event to a per-run Redis Stream.
 
     Args:
-        channel: Redis channel name (e.g., "run:abc-123")
+        channel: Redis Stream key (e.g., "run:abc-123")
         event_type: Event type (e.g., "step_start", "tool_call", "done")
         data: Event data dictionary
 
@@ -88,57 +90,115 @@ async def publish_event(channel: str, event_type: str, data: dict) -> bool:
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
-        await client.publish(channel, message)
+        await client.xadd(channel, {"event": message}, maxlen=1000, approximate=True)
+        # Keep enough history for reconnecting clients without retaining runs forever.
+        await client.expire(channel, 86400)
         return True
     except Exception as e:
         logger.error(f"Failed to publish event to {channel}: {e}")
         return False
 
 
-async def conversation_history_version(client: redis.Redis, session_id: str) -> int:
-    """Return the cache generation for one session's conversation history."""
-    value = await client.get(f"history:version:{session_id}")
-    return int(value or 0)
+def _agent_prompt_config_key(user_id: str, agent_id: str) -> str:
+    return f"agent:prompt-config:{user_id}:{agent_id}"
 
 
-async def prime_recent_conversation_history(
-    session_id: str | None, messages: list[dict]
+async def get_agent_prompt_config(user_id: str, agent_id: str) -> dict | None:
+    """Read the short-lived, non-secret agent configuration cache."""
+    try:
+        client = await asyncio.wait_for(get_redis(), timeout=0.2)
+        if not client:
+            return None
+        value = await asyncio.wait_for(
+            client.get(_agent_prompt_config_key(user_id, agent_id)), timeout=0.2
+        )
+        if not value:
+            return None
+        cached = json.loads(value)
+        return cached if isinstance(cached, dict) else None
+    except Exception as exc:
+        logger.debug("Could not read prompt config cache for agent %s: %s", agent_id, exc)
+        return None
+
+
+async def set_agent_prompt_config(user_id: str, agent_id: str, config: dict) -> None:
+    """Cache an agent's non-secret prompt/config payload for 5 minutes."""
+    try:
+        client = await asyncio.wait_for(get_redis(), timeout=0.2)
+        if client:
+            await asyncio.wait_for(
+                client.set(
+                    _agent_prompt_config_key(user_id, agent_id),
+                    json.dumps(config),
+                    ex=AGENT_PROMPT_CONFIG_TTL_SECONDS,
+                ),
+                timeout=0.2,
+            )
+    except Exception as exc:
+        logger.debug("Could not write prompt config cache for agent %s: %s", agent_id, exc)
+
+
+async def invalidate_agent_prompt_config(user_id: str, agent_id: str) -> None:
+    """Remove a cached prompt config after its agent is changed or deleted."""
+    try:
+        client = await asyncio.wait_for(get_redis(), timeout=0.2)
+        if client:
+            await asyncio.wait_for(
+                client.delete(_agent_prompt_config_key(user_id, agent_id)), timeout=0.2
+            )
+    except Exception as exc:
+        logger.debug("Could not invalidate prompt config cache for agent %s: %s", agent_id, exc)
+
+
+def _agent_execution_config_key(user_id: str) -> str:
+    # One per-user hash lets any provider/KB/tool mutation invalidate all agent
+    # snapshots with one DEL, without scanning Redis keys.
+    return f"agent:execution-config:{user_id}"
+
+
+async def get_agent_execution_config(user_id: str, agent_id: str | None) -> dict | None:
+    """Get the stable run configuration snapshot from Redis, if present."""
+    if not agent_id:
+        return None
+    try:
+        client = await asyncio.wait_for(get_redis(), timeout=0.2)
+        if not client:
+            return None
+        value = await asyncio.wait_for(
+            client.hget(_agent_execution_config_key(user_id), str(agent_id)), timeout=0.2
+        )
+        cached = json.loads(value) if value else None
+        return cached if isinstance(cached, dict) else None
+    except Exception as exc:
+        logger.debug("Could not read run config cache for agent %s: %s", agent_id, exc)
+        return None
+
+
+async def set_agent_execution_config(
+    user_id: str, agent_id: str | None, config: dict
 ) -> None:
-    """Warm a short-lived recent-history snapshot already read for run context."""
-    if not session_id or not messages:
+    """Cache encrypted-secret config snapshots for 8 minutes."""
+    if not agent_id:
         return
     try:
         client = await asyncio.wait_for(get_redis(), timeout=0.2)
         if client:
-            import json
-            version = await asyncio.wait_for(
-                conversation_history_version(client, session_id), timeout=0.2
-            )
-            key = f"history:recent:{session_id}:{version}"
-            payload = json.dumps(messages)
-            if len(payload) > 65536:
-                return
-            await asyncio.wait_for(
-                client.set(key, payload, ex=30), timeout=0.2
-            )
+            key = _agent_execution_config_key(user_id)
+            async with client.pipeline(transaction=False) as pipe:
+                pipe.hset(key, str(agent_id), json.dumps(config))
+                pipe.expire(key, AGENT_EXECUTION_CONFIG_TTL_SECONDS)
+                await asyncio.wait_for(pipe.execute(), timeout=0.2)
     except Exception as exc:
-        logger.debug("Could not warm conversation history cache for %s: %s", session_id, exc)
+        logger.debug("Could not write run config cache for agent %s: %s", agent_id, exc)
 
 
-async def invalidate_conversation_history(session_id: str | None) -> None:
-    """Advance the session history cache generation after a committed message write."""
-    if not session_id:
-        return
+async def invalidate_agent_execution_configs(user_id: str) -> None:
+    """Invalidate every execution snapshot for a user after config changes."""
     try:
         client = await asyncio.wait_for(get_redis(), timeout=0.2)
-    except Exception:
-        return
-    if not client:
-        return
-    try:
-        key = f"history:version:{session_id}"
-        await asyncio.wait_for(client.incr(key), timeout=0.2)
-        await asyncio.wait_for(client.expire(key, HISTORY_CACHE_VERSION_TTL_SECONDS), timeout=0.2)
+        if client:
+            await asyncio.wait_for(client.delete(_agent_execution_config_key(user_id)), timeout=0.2)
     except Exception as exc:
-        # The cache is optional; Postgres remains the source of truth.
-        logger.debug("Could not invalidate conversation history cache for %s: %s", session_id, exc)
+        logger.debug("Could not invalidate run config cache for user %s: %s", user_id, exc)
+
+

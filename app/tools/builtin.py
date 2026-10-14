@@ -35,7 +35,7 @@ class GetKVInput(BaseModel):
     key: str = Field(..., description="The key to retrieve")
 
 class GetConversationHistoryInput(BaseModel):
-    last_n: int = Field(default=10, ge=1, le=100, description="Maximum messages to return, in chronological order (1-100)")
+    last_n: int = Field(default=10, ge=1, le=100, description="Maximum prior completed-session messages to return, in chronological order (1-100)")
     from_date: Optional[str] = Field(default=None, description="Inclusive ISO-8601 start date/time. Date-only values mean midnight UTC; timestamps without an offset are interpreted as UTC.")
     to_date: Optional[str] = Field(default=None, description="Inclusive ISO-8601 end timestamp. A date-only value includes that whole UTC date. Timestamps without an offset are interpreted as UTC.")
     role: Optional[str] = Field(default=None, pattern="^(user|assistant)$", description="Optionally return only 'user' or 'assistant' messages")
@@ -384,11 +384,12 @@ class GetConversationHistoryTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Retrieve older messages from this exact session. Recent turns are already included in your conversation context, "
-            "so do NOT call this tool when the answer is visible there. Call it when the user asks to search, list, or "
-            "compare earlier turns, asks about a date range, or when required details are outside the visible context. "
-            "Use role='user' for questions the user asked, and explicit ISO-8601 UTC date bounds for time filters "
-            "(for a date-only to_date, the entire UTC date is included). Results are chronological and exclude the current run."
+            "Retrieve up to last_n prior messages from this exact session (default 10, maximum 100). Conversation turns "
+            "are not automatically included in your context. Call this tool when the request depends on prior turns, or "
+            "when the user asks to search, list, or compare earlier turns. Use a small last_n when only recent context "
+            "is needed; use role='user' for questions the user asked and explicit ISO-8601 UTC date bounds for time filters "
+            "(for a date-only to_date, the entire UTC date is included). Results are chronological, include completed "
+            "runs only, and exclude the current run."
         )
 
     @property
@@ -399,7 +400,7 @@ class GetConversationHistoryTool(BaseTool):
                       to_date: Optional[str] = None, role: Optional[str] = None, **kwargs) -> ToolResult:
         try:
             from app.db import SessionLocal
-            from app.models.tables import ConversationMessage
+            from app.models.tables import AgentSession, ConversationMessage, Run
             from sqlmodel import select
             from uuid import UUID
             from datetime import datetime, timezone, timedelta
@@ -440,39 +441,24 @@ class GetConversationHistoryTool(BaseTool):
             )
             digest = hashlib.sha256(cache_args.encode("utf-8")).hexdigest()
             session_key = str(UUID(str(session_id)))
+            # Use the DB revision as the cache generation. Message writes bump
+            # this in the same transaction, so Redis invalidation races cannot
+            # make an old result appear current.
+            async with SessionLocal() as db:
+                session_record = await db.get(AgentSession, UUID(session_key))
+                if not session_record:
+                    return ToolResult(ok=True, output="No messages match the specified filters.")
+                history_version = session_record.history_version
             cache_value_key = None
             redis_client = None
             try:
-                from app.redis_client import get_redis, conversation_history_version
+                from app.redis_client import get_redis
                 redis_client = await asyncio.wait_for(get_redis(), timeout=0.2)
                 if redis_client:
-                    version = await asyncio.wait_for(
-                        conversation_history_version(redis_client, session_key), timeout=0.2
-                    )
-                    cache_value_key = f"history:result:{session_key}:{version}:{digest}"
+                    cache_value_key = f"history:v2:result:{session_key}:{history_version}:{digest}"
                     cached = await asyncio.wait_for(redis_client.get(cache_value_key), timeout=0.2)
                     if cached is not None:
                         return ToolResult(ok=True, output=cached)
-                    # build_context already loaded this recent transcript from Postgres;
-                    # reuse it for the first history lookup when it fully covers the request.
-                    if from_date is None and to_date is None:
-                        snapshot_key = f"history:recent:{session_key}:{version}"
-                        snapshot = await asyncio.wait_for(redis_client.get(snapshot_key), timeout=0.2)
-                        if snapshot is not None:
-                            snapshot_rows = json.loads(snapshot)
-                            if role:
-                                snapshot_rows = [row for row in snapshot_rows if row.get("role") == role]
-                            if len(snapshot_rows) >= last_n:
-                                output = "\n\n".join(
-                                    f"[{row['timestamp']}] [{row['role'].upper()}] {row['content']}"
-                                    for row in snapshot_rows[-last_n:]
-                                )
-                                if len(output) > 16000:
-                                    output = output[:16000] + "\n\n[History output truncated at 16000 characters.]"
-                                await asyncio.wait_for(
-                                    redis_client.set(cache_value_key, output, ex=30), timeout=0.2
-                                )
-                                return ToolResult(ok=True, output=output)
             except Exception as cache_exc:
                 log.debug("Conversation history cache read failed: %s", cache_exc)
                 redis_client = None
@@ -480,6 +466,8 @@ class GetConversationHistoryTool(BaseTool):
 
             query = select(ConversationMessage).where(
                 ConversationMessage.session_id == UUID(session_key)
+            ).outerjoin(Run, ConversationMessage.run_id == Run.id).where(
+                or_(ConversationMessage.run_id.is_(None), Run.status == "done")
             )
             current_run_id = getattr(self._ctx, "run_id", None)
             if current_run_id:

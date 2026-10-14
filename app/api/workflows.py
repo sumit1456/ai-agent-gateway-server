@@ -146,13 +146,81 @@ async def delete_workflow(workflow_id: str, current_user: User = Depends(current
         raise HTTPException(status_code=404, detail="Workflow not found")
     versions = await db.exec(select(WorkflowVersion.id).where(WorkflowVersion.workflow_id == workflow.id))
     version_ids = list(versions.all())
+    linked_agents = []
+    default_version = None
     if version_ids:
-        linked = await db.exec(select(Agent.id).where(Agent.workflow_version_id.in_(version_ids)).limit(1))
-        if linked.first():
-            raise HTTPException(status_code=409, detail="This workflow is assigned to an agent. Assign the agent to another workflow before deleting it.")
-        used = await db.exec(select(Run.id).where(Run.workflow_version_id.in_(version_ids)).limit(1))
-        if used.first():
-            raise HTTPException(status_code=409, detail="This workflow has run history. Delete its agent and run history before deleting the workflow.")
+        linked = await db.exec(select(Agent).where(Agent.workflow_version_id.in_(version_ids)))
+        linked_agents = linked.all()
+        if linked_agents:
+            default_result = await db.exec(
+                select(Workflow)
+                .where(Workflow.user_id == current_user.id, Workflow.source_preset == "dynamic", Workflow.id != workflow.id)
+                .order_by(Workflow.updated_at.desc())
+            )
+            default_workflow = default_result.first()
+            if default_workflow:
+                active_result = await db.exec(
+                    select(WorkflowVersion)
+                    .where(WorkflowVersion.workflow_id == default_workflow.id, WorkflowVersion.is_active == True)
+                    .order_by(WorkflowVersion.version.desc()).limit(1)
+                )
+                default_version = active_result.first()
+            if not default_version:
+                preset = get_preset("dynamic")
+                if not preset:
+                    raise HTTPException(status_code=500, detail="The default Dynamic workflow is unavailable")
+                if not default_workflow:
+                    default_workflow = Workflow(
+                        user_id=current_user.id,
+                        name=preset["name"],
+                        description=preset["description"],
+                        source_preset="dynamic",
+                    )
+                    db.add(default_workflow)
+                    await db.flush()
+                version_result = await db.exec(
+                    select(WorkflowVersion.version)
+                    .where(WorkflowVersion.workflow_id == default_workflow.id)
+                    .order_by(WorkflowVersion.version.desc()).limit(1)
+                )
+                previous_version = version_result.first() or 0
+                default_version = WorkflowVersion(
+                    workflow_id=default_workflow.id,
+                    version=previous_version + 1,
+                    definition=preset["definition"],
+                )
+                db.add(default_version)
+                await db.flush()
+
+            for agent in linked_agents:
+                agent.workflow_version_id = default_version.id
+                if isinstance(agent.config, dict):
+                    agent.config = {**agent.config, "workflow_version_id": str(default_version.id)}
+                db.add(agent)
+
+        # Keep run records and step traces intact while releasing the version
+        # foreign key so the workflow and its versions can be deleted safely.
+        version_rows = await db.exec(select(WorkflowVersion).where(WorkflowVersion.id.in_(version_ids)))
+        version_map = {row.id: row for row in version_rows.all()}
+        history = await db.exec(select(Run).where(Run.workflow_version_id.in_(version_ids)))
+        for run in history.all():
+            version = version_map.get(run.workflow_version_id)
+            state = dict(run.state or {})
+            if version:
+                state["workflow_snapshot"] = {
+                    "workflow_id": str(workflow.id),
+                    "workflow_name": workflow.name,
+                    "version": version.version,
+                    "definition": version.definition,
+                }
+            run.state = state
+            run.workflow_version_id = None
+            db.add(run)
     await db.delete(workflow)
     await db.commit()
-    return {"ok": True}
+    return {
+        "ok": True,
+        "agents_reassigned": len(linked_agents),
+        "default_workflow_id": str(default_version.workflow_id) if default_version else None,
+        "default_workflow_name": default_workflow.name if default_version else None,
+    }
