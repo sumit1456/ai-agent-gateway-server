@@ -1,6 +1,6 @@
 services:
   backend:
-    image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME in .env}/ai-agent-gateway-server:${BACKEND_IMAGE_TAG:?Set BACKEND_IMAGE_TAG in .env}
+    image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME in .env}/ai-agent-gateway-server:${BACKEND_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       PORT: 8000
@@ -29,7 +29,7 @@ services:
       retries: 3
 
   frontend:
-    image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME in .env}/ai-agent-gateway-ui:${FRONTEND_IMAGE_TAG:?Set FRONTEND_IMAGE_TAG in .env}
+    image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME in .env}/ai-agent-gateway-ui:${FRONTEND_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       BACKEND_URL: http://backend:8000
