@@ -7,7 +7,7 @@ from app.engine.retry import plan_hash
 from app.engine.state_ops import (PlanError, apply_result, fallback_answer, ready_steps,
                                   validate_plan)
 from app.engine.tool_loop import run_step, run_tool_loop
-from app.engine.types import (ControllerDecision, Plan, ReviewResult, RouteDecision,
+from app.engine.types import (ControllerDecision, InitialDecision, Plan, ReviewResult, RouteDecision,
                               RunState, StepResult, StepVerdict, StopRun)
 from app.engine.views import (build_view, clip, assemble, conversation_messages,
                               context_char_budget, task_ledger)
@@ -37,7 +37,7 @@ def get_ctx(config: RunnableConfig):
     return config["configurable"]["ctx"]
 
 # ---------------- router ----------------
-async def router_node(state: RunState, config: RunnableConfig) -> dict:
+async def legacy_router_node(state: RunState, config: RunnableConfig) -> dict:
     start_time = time.time()
     ctx = get_ctx(config)
     
@@ -99,6 +99,74 @@ async def router_node(state: RunState, config: RunnableConfig) -> dict:
     await _publish_run_event(ctx.run_id, "node_complete", {"node": "router", "status": mode})
     trace.log_routing_decision("ROUTER", mode.upper(), f"Selected mode: {mode}")
     
+    _log_timing("ROUTER", start_time, ctx, {"mode": mode, "tools_count": len(visible)})
+    return result
+
+async def router_node(state: RunState, config: RunnableConfig) -> dict:
+    """Select the initial role and complete its work in one model call."""
+    start_time = time.time()
+    ctx = get_ctx(config)
+    trace = get_trace_logger(ctx.run_id)
+    trace.log_node_enter("ROUTER", state)
+    from app.engine.runner import _publish_run_event
+    await ctx.sink.emit("run.started", {"run_id": ctx.run_id})
+    await _publish_run_event(ctx.run_id, "node_enter", {"node": "router", "status": "Selecting and running role"})
+
+    visible = [name for name in ctx.tools.names() if name != "read_artifact"]
+    forced = ctx.config.limits.force_mode
+    system = "\n\n".join([
+        get_prompt(ctx.config, "router"),
+        "Choose a role and complete that role's work in this same response. For direct, provide the complete user-facing answer in answer. Choose plan when tools, knowledge retrieval, or multi-step work is needed; return executable steps and do not answer yet.",
+        f"Direct role instructions:\n{get_prompt(ctx.config, 'direct')}",
+        f"Planner role instructions:\n{get_prompt(ctx.config, 'planner', max_steps=ctx.config.limits.max_steps)}",
+    ])
+    user = assemble([
+        ("GOAL", state.get("goal", "")),
+        ("SHARED TASK LIST", task_ledger(state)),
+        ("AVAILABLE TOOLS", ", ".join(visible) if visible else "(none)"),
+        ("KNOWLEDGE BASE", "available" if ctx.kb_namespaces else "not available"),
+        ("REQUIRED MODE", forced or "Choose direct or plan."),
+    ], context_char_budget(ctx, 9000))
+    from langchain_core.messages import SystemMessage, HumanMessage
+    messages = [SystemMessage(content=system), *conversation_messages(ctx, recent_limit=4), HumanMessage(content=user)]
+    decision: InitialDecision = await llm.structured_call(ctx, "router", InitialDecision, system, user,
+                                                          prior_messages=conversation_messages(ctx, recent_limit=4))
+    trace.log_llm_messages("router", messages, decision)
+    mode = forced or decision.mode
+    result: dict = {"mode": mode}
+
+    if mode == "direct":
+        answer = decision.answer.strip() or "I’m sorry, I couldn’t produce an answer for that request."
+        result.update({"answer": answer, "status": "done", "stop_reason": None,
+                       "facts": state.get("facts", [])})
+        await ctx.sink.emit("answer.done", {"text": answer})
+        await _publish_run_event(ctx.run_id, "node_complete", {"node": "router", "status": "direct"})
+    else:
+        try:
+            plan = Plan(steps=decision.steps)
+            existing_ids = {step["id"] for step in state.get("steps", [])}
+            new_steps = validate_plan(plan, set(ctx.tools.names()), existing_ids,
+                                      {s["id"] for s in state.get("steps", []) if s["status"] == "done"},
+                                      ctx.config.limits.max_steps)
+        except PlanError as exc:
+            trace.log_error(f"Initial plan validation failed: {exc}")
+            answer = decision.answer.strip() or f"I couldn’t create a valid execution plan: {exc}"
+            result.update({"mode": "direct", "answer": answer, "status": "done",
+                           "stop_reason": None, "facts": state.get("facts", [])})
+            mode = "direct"
+            await ctx.sink.emit("answer.done", {"text": answer})
+            await _publish_run_event(ctx.run_id, "node_complete", {"node": "router", "status": "direct"})
+        else:
+            result.update({"steps": state.get("steps", []) + new_steps,
+                           "plan_hashes": state.get("plan_hashes", []) + [plan_hash(new_steps)]})
+            await _publish_run_event(ctx.run_id, "plan_created", {
+                "steps": [{"id": step["id"], "tool": step.get("tools", []), "description": step.get("goal", "")}
+                          for step in new_steps]})
+            await _publish_run_event(ctx.run_id, "node_complete", {"node": "router", "status": "plan"})
+
+    trace.log_custom(f"Selected and completed initial role: {mode} ({decision.reason})")
+    trace.log_node_exit("ROUTER", result)
+    trace.log_routing_decision("ROUTER", mode.upper(), decision.reason)
     _log_timing("ROUTER", start_time, ctx, {"mode": mode, "tools_count": len(visible)})
     return result
 

@@ -23,7 +23,7 @@ This project implements a gateway service that allows developers to register, co
 
 ### Run progress streaming
 
-Configure Redis to enable authenticated SSE progress events. Polling remains available when Redis is not configured.
+Configure Redis to enable authenticated SSE progress events. Final result delivery uses customer webhooks; run status polling remains available for troubleshooting.
 
 ```env
 REDIS_URL=redis://localhost:6379
@@ -32,6 +32,44 @@ REDIS_PASSWORD=
 ```
 
 For TLS Redis services, set `REDIS_URL` to an `rediss://` URL and `REDIS_SSL=true`. Subscribe to `GET /v1/runs/{run_id}/stream` with the same bearer token used for other run endpoints. The stream emits a sanitized `progress_snapshot`, plan/task lifecycle events, `answer.delta` text chunks, `answer.reset` when an in-progress draft must be discarded (for example, after a tool call), and terminal `run_completed` or `run_failed` events. It does not stream private model reasoning, prompts, or raw tool output. Without reachable Redis, this endpoint returns `503`; use `GET /v1/runs/{run_id}` for polling.
+
+### Receive final results with a webhook
+
+Customer integrations do not need to poll for completed results. Configure one
+HTTPS result receiver per account from **Dashboard → Integration Guide → Result
+webhook**. Save the generated `whsec_...` signing secret in the receiver's server
+environment; it is separate from the `gw_...` API key used to submit runs and is
+shown only at creation or rotation. Use **Send test event** to verify delivery.
+
+After setup, submit a run as usual:
+
+```http
+POST /v1/agents/{agent_id}/run
+Authorization: Bearer gw_...
+Content-Type: application/json
+
+{"input":"Process document 123"}
+```
+
+The API returns `202 Accepted` with `run_id` and `session_id`. After the result
+is committed to Postgres, the gateway sends `run.completed` or `run.failed` to
+the registered URL. The callback JSON includes an event `id`, event `type`,
+`created_at`, `run_id`, `agent_id`, `status`, `result`, `tokens_used`,
+`duration_ms`, and `stop_reason`.
+
+The receiver must verify `X-AGW-Signature` against the **exact raw request body**:
+
+```text
+sha256=<lowercase hex HMAC-SHA256(raw_body, signing_secret)>
+```
+
+`X-AGW-Event` identifies the event and `X-AGW-Delivery` identifies the delivery
+attempt. Treat payload `id` as the event idempotency key: the same event can be
+delivered again if an earlier attempt was not acknowledged. Return a 2xx status
+only after recording the event. Failed deliveries retry up to eight times with
+backoff; the dashboard shows delivery status and allows failed deliveries to be
+retried. `GET /v1/runs/{run_id}` remains available for manual recovery and
+troubleshooting, not as the normal result path.
 
 ## Architecture
 

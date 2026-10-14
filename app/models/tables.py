@@ -174,6 +174,36 @@ class Run(SQLModel, table=True):
     duration_ms: int = 0
     created_at: datetime = ts()
 
+class WebhookEndpoint(SQLModel, table=True):
+    __tablename__ = "webhook_endpoints"
+    id: UUID = pk()
+    user_id: UUID = Field(foreign_key="users.id", unique=True, index=True, ondelete="CASCADE")
+    url: str
+    signing_secret_enc: str
+    enabled: bool = True
+    created_at: datetime = ts()
+    updated_at: datetime = ts()
+
+class WebhookDelivery(SQLModel, table=True):
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (Index("ix_webhook_deliveries_due", "status", "next_attempt_at"),)
+    id: UUID = pk()
+    user_id: UUID = Field(foreign_key="users.id", index=True, ondelete="CASCADE")
+    run_id: UUID | None = Field(default=None, foreign_key="runs.id", index=True, ondelete="SET NULL")
+    event_type: str
+    endpoint_url: str
+    signing_secret_enc: str
+    payload: dict = jb()
+    status: str = "pending"  # pending | processing | delivered | failed
+    attempts: int = 0
+    next_attempt_at: datetime = ts()
+    last_attempt_at: datetime | None = Field(default=None, nullable=True)
+    last_status_code: int | None = Field(default=None, nullable=True)
+    last_error: str | None = Field(default=None, nullable=True)
+    delivered_at: datetime | None = Field(default=None, nullable=True)
+    created_at: datetime = ts()
+    updated_at: datetime = ts()
+
 class ConversationMessage(SQLModel, table=True):
     __tablename__ = "conversation_messages"
     __table_args__ = (

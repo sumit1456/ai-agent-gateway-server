@@ -9,6 +9,7 @@ This script tests the full agent workflow:
 5. Run the agent
 6. Poll for results
 """
+from check_provider_config import BASE_URL
 import requests
 import json
 import time
@@ -16,8 +17,10 @@ import sys
 import os
 
 # Configuration
-API_KEY = "gw_e7Fr03839mz9055IxM7cNBMQN1OD6WOHJoXWdgi2HsM"
-BASE_URL = "http://localhost:8000"
+#API_KEY = "gw_YoeQ2GrWxYPCRV1FrJBGIDlEumEuwe80ePuPKk-uk2Y"
+API_KEY = "gw_I7HYC7lJxHlI4a944CZeL09LYeu0rO7TPxfigVPsbMQ"
+# BASE_URL = "https://agent-gateway-server.corstack.in"
+BASE_URL="http://localhost:8000"
 END_USER_ID = "test_user_123"  # Simulate an end-user
 USE_SSE = os.getenv("USE_SSE", "false").lower() in {"1", "true", "yes"}
 

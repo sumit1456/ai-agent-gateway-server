@@ -398,7 +398,9 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         
         # Update Run record in DB
         from app.db import SessionLocal
-        from app.models.tables import AgentSession, Run, ConversationMessage
+        from app.models.tables import AgentSession, Run, ConversationMessage, WebhookEndpoint
+        from app.webhooks import make_delivery
+        from sqlmodel import select
         from sqlalchemy import update
         run = None
         try:
@@ -438,6 +440,30 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
                             final_state, run_id, "interrupted" if error else "completed"
                         )
                         db.add(session)
+
+                    # Save the customer callback in the same transaction as the
+                    # terminal run result. The worker sends it only after commit.
+                    endpoint = (await db.exec(select(WebhookEndpoint).where(
+                        WebhookEndpoint.user_id == run.user_id,
+                        WebhookEndpoint.enabled == True,  # noqa: E712
+                    ))).first()
+                    if endpoint:
+                        event_type = "run.failed" if error else "run.completed"
+                        db.add(make_delivery(
+                            endpoint=endpoint,
+                            user_id=run.user_id,
+                            run_id=run.id,
+                            event_type=event_type,
+                            payload={
+                                "run_id": str(run.id),
+                                "agent_id": str(run.agent_id),
+                                "status": run.status,
+                                "result": run.result,
+                                "tokens_used": run.tokens_used,
+                                "duration_ms": run.duration_ms,
+                                "stop_reason": run.stop_reason,
+                            },
+                        ))
                     
                     db_commit_started = time.perf_counter()
                     await db.commit()

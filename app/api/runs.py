@@ -115,7 +115,7 @@ async def list_builtin_tools():
     }
 
 
-@router.post("/agents/{agent_id}/run", response_model=dict)
+@router.post("/agents/{agent_id}/run", response_model=dict, status_code=status.HTTP_202_ACCEPTED)
 async def create_run(
     agent_id: str,
     payload: RunRequest,
@@ -128,10 +128,9 @@ async def create_run(
     Create a new run for an agent.
     
     Returns immediately with run_id and status='running'.
-    Poll GET /v1/runs/{run_id} to check status, or stream updates from
-    GET /v1/runs/{run_id}/stream when Redis is configured.
-    
-    Recommended polling interval: 1-2 seconds
+    Returns immediately with a run_id. When a result webhook is configured,
+    the terminal result is delivered there after it is committed to Postgres.
+    GET /v1/runs/{run_id} remains available for troubleshooting and recovery.
     
     Headers (optional):
         X-End-User-ID: Identifier for your end-user (for multi-tenant tracking)
@@ -337,7 +336,7 @@ async def create_run(
         "run_id": run_id,
         "session_id": str(session.id),
         "status": "running",
-        "message": "Run started successfully. Poll GET /v1/runs/{run_id} or stream GET /v1/runs/{run_id}/stream for updates."
+        "message": "Run accepted. The result will be sent to your configured webhook when complete."
     }
 
 @router.get("/runs/{run_id}", response_model=dict)

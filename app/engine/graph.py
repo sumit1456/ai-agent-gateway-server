@@ -24,8 +24,8 @@ def build_graph():
         "router",
         lambda state: state.get("mode", "direct"),
         {
-            "direct": "direct",
-            "plan": "planner",
+            "direct": END,
+            "plan": "executor",
         }
     )
 

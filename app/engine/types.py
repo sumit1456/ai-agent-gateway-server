@@ -100,6 +100,13 @@ class PlanStep(BaseModel):
 class Plan(BaseModel):
     steps: list[PlanStep]
 
+class InitialDecision(BaseModel):
+    """Choose a role and complete its first unit of work in one model call."""
+    mode: Literal["direct", "plan"]
+    reason: str = ""
+    answer: str = ""
+    steps: list[PlanStep] = Field(default_factory=list)
+
 class StepResult(BaseModel):
     status: Literal["done", "failed"]
     summary: str                # <= 2 sentences
