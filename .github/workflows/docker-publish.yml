@@ -32,10 +32,6 @@ jobs:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/ai-agent-gateway-server
           tags: |
             type=raw,value=latest
-            type=sha,prefix=sha-,format=short
-            type=semver,pattern={{version}},prefix=v
-            type=semver,pattern={{major}}.{{minor}},prefix=v
-            type=semver,pattern={{major}},prefix=v
 
       - name: Build and push
         uses: docker/build-push-action@v6
