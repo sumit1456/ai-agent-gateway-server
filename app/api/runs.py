@@ -127,8 +127,9 @@ async def create_run(
     """
     Create a new run for an agent.
     
-    Returns immediately with run_id and status='running'. Subscribe to the
-    authenticated run stream for progress and terminal results.
+    Returns immediately with run_id and status='running'. Subscribe to
+    GET /v1/runs/{run_id}/stream with the same bearer token to receive progress
+    and the terminal result. GET /v1/runs/{run_id} remains available for polling.
     
     Headers (optional):
         X-End-User-ID: Identifier for your end-user (for multi-tenant tracking)
@@ -334,7 +335,7 @@ async def create_run(
         "run_id": run_id,
         "session_id": str(session.id),
         "status": "running",
-        "message": "Run accepted. Subscribe to the run stream for progress and results."
+        "message": "Run accepted. Subscribe to the authenticated run event stream for progress and the result."
     }
 
 @router.get("/runs/{run_id}", response_model=dict)

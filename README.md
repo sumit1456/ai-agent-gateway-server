@@ -23,7 +23,7 @@ This project implements a gateway service that allows developers to register, co
 
 ### Run progress streaming
 
-Configure Redis to enable authenticated SSE progress events and terminal run results. Run status polling remains available for recovery.
+Configure Redis to enable authenticated SSE progress events and final run results. The same bearer token used to create a run authenticates the stream request. Run status polling remains available as a fallback.
 
 ```env
 REDIS_URL=redis://localhost:6379
@@ -33,18 +33,9 @@ REDIS_PASSWORD=
 
 For TLS Redis services, set `REDIS_URL` to an `rediss://` URL and `REDIS_SSL=true`. Subscribe to `GET /v1/runs/{run_id}/stream` with the same bearer token used for other run endpoints. The stream emits a sanitized `progress_snapshot`, plan/task lifecycle events, `answer.delta` text chunks, `answer.reset` when an in-progress draft must be discarded (for example, after a tool call), and terminal `run_completed` or `run_failed` events. It does not stream private model reasoning, prompts, or raw tool output. Without reachable Redis, this endpoint returns `503`; use `GET /v1/runs/{run_id}` for polling.
 
-### Receive final results with SSE
+### Read run results with SSE
 
-Submit a run as usual, then subscribe to its authenticated event stream using
-the same bearer token. The gateway uses its own Redis connection to retain and
-replay run events; clients do not need Redis credentials.
-
-POST /v1/agents/{agent_id}/run with Authorization: Bearer gw_... and a JSON body
-containing the input. The API returns 202 Accepted with run_id and session_id.
-Subscribe to GET /v1/runs/{run_id}/stream to receive connected, progress, and
-terminal run_completed or run_failed events. Terminal events include the result,
-token usage, duration, and stop reason. GET /v1/runs/{run_id} remains available
-for recovery and troubleshooting.
+After creating a run, subscribe to GET /v1/runs/{run_id}/stream with the same Authorization bearer token. The stream replays Redis events, sends progress, and ends with run_completed or run_failed carrying the terminal result. No webhook endpoint or separate signing token is required. Keep the gateway token on your backend and relay events to your frontend over your own authenticated connection. Redis must be reachable for SSE; GET /v1/runs/{run_id} remains available for polling.
 
 ## Architecture
 
