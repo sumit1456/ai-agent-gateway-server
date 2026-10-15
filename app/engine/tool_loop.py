@@ -144,9 +144,16 @@ async def parse_step_result(ctx, text: str) -> StepResult:
 async def run_step(ctx, state, step) -> StepResult:
     kb_text = await prefetch_kb(ctx, step.get("kb_queries", []))
     view = build_view("executor", state, ctx, step=step, kb_text=kb_text)
-    names = set(step.get("tools", [])) | {"read_artifact"}
-    if ctx.kb_namespaces:
-        names.add("semantic_search")
+    names = set(step.get("tools", []))
+    # The full artifact reader is useful only when an explicitly requested
+    # dependency was clipped in the executor's compact input view.
+    if any(
+        len((ctx.artifacts.get(source.get("artifact_id") or "") or {}).get("content", "")) > 1500
+        for source_id in step.get("inputs", [])
+        for source in state.get("steps", [])
+        if source.get("id") == source_id and source.get("status") == "done"
+    ):
+        names.add("read_artifact")
     executor_prompt = get_prompt(ctx.config, "executor")
     text, _errors = await run_tool_loop(ctx, f"{ctx.persona}\n\n{executor_prompt}", view, sorted(names))
     return await parse_step_result(ctx, text)

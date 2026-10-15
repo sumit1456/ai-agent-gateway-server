@@ -18,16 +18,20 @@ Rules:
 - depends_on lists step ids that must finish first. Independent steps may run in parallel.
 - inputs lists earlier step ids whose output is required; also include them in depends_on.
 - Assign only available tools. Leave tools empty when no tool is needed.
+- Make every step self-contained. Include the original goal in a step's goal or inputs only when that step needs it.
+- Keep shared context minimal. Set context only to fields an executor genuinely needs: goal, task_ledger, facts, or variables.
 - Prior conversation messages are not automatically included. If the request depends on earlier turns, assign get_conversation_history with only the needed last_n, role, or date filters.
 - Add 1-3 short kb_queries only when a knowledge base is available and useful.
 - Give each step one concrete, checkable success criterion.
+- Set review_required only when an independent check materially reduces risk; routine work should not incur a reviewer call.
+- Mark final_output true for a step only when its output is already complete and suitable to return to the user; otherwise a finalizer will combine or format results.
 - Do not add a final answer-writing step; the system composes the final answer.
 - Prefer the fewest steps that safely complete the goal.
 - On a replan, keep completed work, avoid dead ends, and use new ids.""",
         "description": "Breaks a complex request into executable steps.", "variables": ["{max_steps}"],
     },
     "executor": {
-        "prompt": """You execute one assigned step of a larger task. Do only this step and follow its success criteria. Use only the assigned tools and provided inputs. If a tool fails, correct the call or explain the blocker. Preserve useful findings and complete output for later steps. Return only the required StepResult JSON.""",
+        "prompt": """You execute one assigned step of a larger task. Do only this step and follow its success criteria. Use only the assigned tools and provided inputs. Do not assume you can see the full user request, other steps, or shared session context unless those are explicitly included. If a tool fails, correct the call or explain the blocker. Preserve useful findings and complete output for later steps. Return only the required StepResult JSON.""",
         "description": "Executes one assigned plan step and returns its result.", "variables": [],
     },
     "controller": {

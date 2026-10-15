@@ -180,16 +180,17 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
             raise RuntimeError(f"Workflow step {current} exceeded its {node.get('max_attempts', 1)}-attempt limit")
         step_input = _resolve_input(node, request, variables, outputs)
         role = node["role"]
-        if role in {"planner", "controller", "direct"}:
-            # Show only tools that the workflow has explicitly assigned to at
-            # least one step. Other steps still receive only their own tools.
+        if role == "planner":
+            # The planner needs a concise catalog to assign tools. Executor and
+            # direct steps receive the real schemas through tool binding, so do
+            # not duplicate their descriptions in prompt text.
             assigned_tool_names = list(dict.fromkeys(
                 tool_name
                 for workflow_node in definition["nodes"]
                 for tool_name in (workflow_node.get("tools") or [])
             ))
             step_input["available_tools"] = [
-                description for description in ctx.tools.describe()
+                description for description in ctx.tools.describe(max_description_chars=320)
                 if description.split(":", 1)[0] in assigned_tool_names
             ]
         if role == "controller":
@@ -223,7 +224,12 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
             if unknown:
                 raise ValueError(f"Step {current} requests unavailable tools: {', '.join(sorted(unknown))}")
             tools = requested
-            if tools:
+            return_input = node.get("return_input")
+            if return_input:
+                value = step_input[return_input]
+                output = value if isinstance(value, dict) else {"response": value}
+                text = json.dumps(output, ensure_ascii=False, default=str)
+            elif tools:
                 text, _ = await run_tool_loop(ctx, system, user, tools, role=role)
             else:
                 llm_started = time.perf_counter()

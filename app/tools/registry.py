@@ -21,9 +21,18 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools.keys())
 
-    def describe(self, exclude: Optional[set[str]] = None) -> list[str]:
+    def describe(self, exclude: Optional[set[str]] = None,
+                 max_description_chars: int | None = None) -> list[str]:
         exclude = exclude or set()
-        return [f"{name}: {tool.description}" for name, tool in self._tools.items() if name not in exclude]
+        descriptions = []
+        for name, tool in self._tools.items():
+            if name in exclude:
+                continue
+            description = tool.description
+            if max_description_chars is not None and len(description) > max_description_chars:
+                description = description[:max_description_chars - 1] + "…"
+            descriptions.append(f"{name}: {description}")
+        return descriptions
 
     def schemas(self, tool_names: list[str]) -> list:
         """Get LangChain tool schemas for the given tool names."""

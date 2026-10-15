@@ -133,15 +133,17 @@ def _inputs(state, ctx, step) -> str:
         if not s or s["status"] != "done":
             continue
         art = ctx.artifacts.get(s.get("artifact_id") or "")
-        out = clip(art["content"], 1500) if art else ""
-        blocks.append(f"[{sid}] {s.get('result_summary')}\n{out}\n(full output: artifact {s.get('artifact_id')})")
+        content = art.get("content", "") if art else ""
+        out = clip(content, 1500)
+        artifact_note = f"\n(full output available via read_artifact: {s.get('artifact_id')})" if len(content) > 1500 else ""
+        blocks.append(f"[{sid}] {s.get('result_summary')}\n{out}{artifact_note}")
     return "\n\n".join(blocks)
 
 def build_view(role: str, state, ctx, step=None, wave=None, kb_text: str | None = None) -> str:
     variables = json.dumps(state.get("variables", {}), default=str) if state.get("variables") else ""
 
     if role == "planner":
-        tools = "\n".join(ctx.tools.describe(exclude={"read_artifact"}))
+        tools = "\n".join(ctx.tools.describe(exclude={"read_artifact"}, max_description_chars=320))
         goal_text = state.get("goal", "").lower()
         continue_intent = re.search(r"\b(continue|resume|pick up|carry on|unfinished|previous task|ongoing task)\b", goal_text)
         session_context = ""
@@ -170,18 +172,19 @@ def build_view(role: str, state, ctx, step=None, wave=None, kb_text: str | None 
         return assemble(sections, context_char_budget(ctx, BUDGET["planner"]))
 
     if role == "executor":
+        requested_context = set(step.get("context", []))
         knowledge = kb_text if kb_text else ("no relevant results found; try semantic_search with a different query"
                                               if step.get("kb_queries") else "")
         sections = [
-            ("OVERALL GOAL", state["goal"]),
-            ("SHARED TASK LIST", task_ledger(state, active_step_id=step.get("id"))),
+            ("OVERALL GOAL", state["goal"] if "goal" in requested_context else ""),
+            ("SHARED TASK LIST", task_ledger(state, active_step_id=step.get("id")) if "task_ledger" in requested_context else ""),
             ("YOUR STEP", f"{step['id']}: {step['goal']}"),
             ("SUCCESS CRITERIA", step.get("success_criteria", "")),
             ("PREVIOUS ATTEMPT PROBLEMS (fix these)", "\n".join(f"- {p}" for p in step.get("problems", []))),
             ("INPUTS FROM EARLIER STEPS", _inputs(state, ctx, step)),
-            ("FACTS", _facts(state)),
+            ("FACTS", _facts(state) if "facts" in requested_context else ""),
             ("KNOWLEDGE", knowledge),
-            ("VARIABLES", variables),
+            ("VARIABLES", variables if "variables" in requested_context else ""),
         ]
         return assemble(sections, context_char_budget(ctx, BUDGET["executor"]))
 
@@ -194,7 +197,6 @@ def build_view(role: str, state, ctx, step=None, wave=None, kb_text: str | None 
                 f"status: {s['status']}\nsummary: {s.get('result_summary')}\n"
                 f"output: {clip(art['content'], 1500) if art else ''}\nproblems: {s.get('problems', [])}")
         return assemble([("OVERALL GOAL", state["goal"]),
-                         ("SHARED TASK LIST", task_ledger(state)),
                          ("STEPS TO REVIEW", "\n\n".join(blocks))],
                         context_char_budget(ctx, BUDGET["reviewer"]))
 
@@ -211,10 +213,8 @@ def build_view(role: str, state, ctx, step=None, wave=None, kb_text: str | None 
         stop = state.get("stop_reason") or "done"
         sections = [
             ("USER REQUEST", state["goal"]),
-            ("SHARED TASK LIST", task_ledger(state)),
             ("RUN STOPPED EARLY", f"reason: {stop}" if stop != "done" else ""),
             ("STEP RESULTS", "\n\n".join(blocks)),
-            ("FACTS", _facts(state)),
         ]
         return assemble(sections, context_char_budget(ctx, BUDGET["finalizer"]))
 

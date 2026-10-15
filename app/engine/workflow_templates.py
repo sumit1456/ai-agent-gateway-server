@@ -17,9 +17,9 @@ def _node(node_id: str, name: str, role: str, instructions: str, input_mapping=N
 SIMPLE = {
     "schema_version": 1, "start_node": "plan",
     "nodes": [
-        _node("plan", "Plan", "planner", "Break the request into a concise, actionable plan. Prior conversation messages are not automatically included; if the request depends on earlier turns, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless needed."),
-        _node("execute", "Execute", "executor", "Complete the task using the request and plan. Call an assigned tool only when the plan requires it.", {"request": "$.request", "plan": "$.steps.plan.output"}),
-        _node("finalize", "Finalize", "finalizer", "Present the completed result clearly.", {"request": "$.request", "work": "$.steps.execute.output"}),
+        _node("plan", "Plan", "planner", "Return a complete, self-contained JSON plan in a steps array. Include concrete tasks, dependencies, required inputs, assigned tools, and success criteria. Executors will receive only this plan, so include the request details they need in the relevant task or input. Prior conversation messages are not automatically included; if needed, assign get_conversation_history to the executor task. Use semantic_search only when useful and available.", output_schema={"steps": "array"}),
+        _node("execute", "Execute", "executor", "Complete the self-contained plan in the supplied steps. Call an assigned tool only when the plan requires it.", {"steps": "$.steps.plan.output.steps"}),
+        {**_node("finalize", "Finalize", "finalizer", "Present the completed executor output clearly. Preserve useful details and do not add unsupported claims.", {"work": "$.steps.execute.output"}), "return_input": "work"},
     ],
     "edges": [{"from": "plan", "to": "execute"}, {"from": "execute", "to": "finalize"}],
     "limits": {"max_steps": 12, "max_retries_per_step": 1},
@@ -29,10 +29,10 @@ SIMPLE["nodes"][1]["tools"] = ["get_conversation_history", "semantic_search"]
 REVIEWED = {
     "schema_version": 1, "start_node": "plan",
     "nodes": [
-        _node("plan", "Plan", "planner", "Break the request into a concise, actionable plan. Prior conversation messages are not automatically included; if the request depends on earlier turns, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless needed."),
-        _node("execute", "Execute", "executor", "Complete the task using the request and plan. Call an assigned tool only when the plan requires it.", {"request": "$.request", "plan": "$.steps.plan.output"}),
-        _node("review", "Review", "reviewer", "Review the work. Return a JSON object with passed (boolean) and feedback (string).", {"request": "$.request", "work": "$.steps.execute.output"}, {"passed": "boolean", "feedback": "string"}),
-        _node("finalize", "Finalize", "finalizer", "Present the reviewed result clearly.", {"request": "$.request", "work": "$.steps.execute.output", "review": "$.steps.review.output"}),
+        _node("plan", "Plan", "planner", "Return a complete, self-contained JSON plan in a steps array. Include concrete tasks, dependencies, required inputs, assigned tools, and success criteria. Executors will receive only this plan, so include the request details they need in the relevant task or input. Prior conversation messages are not automatically included; if needed, assign get_conversation_history to the executor task. Use semantic_search only when useful and available.", output_schema={"steps": "array"}),
+        _node("execute", "Execute", "executor", "Complete the self-contained plan in the supplied steps. Call an assigned tool only when the plan requires it.", {"steps": "$.steps.plan.output.steps"}),
+        _node("review", "Review", "reviewer", "Review the plan and execution output against the stated goals and criteria. Return JSON with passed (boolean) and feedback (string).", {"plan": "$.steps.plan.output.steps", "work": "$.steps.execute.output"}, {"passed": "boolean", "feedback": "string"}),
+        _node("finalize", "Finalize", "finalizer", "Present the reviewed executor output clearly, applying review feedback where appropriate.", {"work": "$.steps.execute.output", "review": "$.steps.review.output"}),
     ],
     "edges": [{"from": "plan", "to": "execute"}, {"from": "execute", "to": "review"}, {"from": "review", "to": "finalize"}],
     "limits": {"max_steps": 16, "max_retries_per_step": 1},
@@ -158,6 +158,14 @@ def validate_definition(definition: dict) -> list[str]:
             errors.append(f"Node {node.get('id')} needs instructions")
         if not isinstance(node.get("input_mapping", {}), dict):
             errors.append(f"Node {node.get('id')} input_mapping must be an object")
+        return_input = node.get("return_input")
+        if return_input is not None and (
+            node.get("role") != "finalizer"
+            or not isinstance(return_input, str)
+            or not return_input.strip()
+            or return_input not in (node.get("input_mapping") or {})
+        ):
+            errors.append(f"Node {node.get('id')} return_input must name a mapped finalizer input")
         if not isinstance(node.get("output_schema", {}), dict):
             errors.append(f"Node {node.get('id')} output_schema must be an object")
         if not isinstance(node.get("tools", []), list) or any(not isinstance(tool, str) for tool in node.get("tools", [])):

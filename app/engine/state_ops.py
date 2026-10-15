@@ -26,6 +26,7 @@ def validate_plan(plan: Plan, allowed_tools: set[str], used_ids: set[str],
         raise PlanError(f"step ids already used: {sorted(clash)}; use new ids")
     known = set(new_ids) | done_ids
     steps: list[Step] = []
+    allowed_context = {"goal", "task_ledger", "facts", "variables"}
     for s in raw:
         inputs = [i for i in dict.fromkeys(s.inputs) if i in known and i != s.id]
         deps = [d for d in dict.fromkeys(s.depends_on + inputs) if d in known and d != s.id]
@@ -38,6 +39,8 @@ def validate_plan(plan: Plan, allowed_tools: set[str], used_ids: set[str],
             kb_queries=s.kb_queries[:3], 
             depends_on=deps,
             success_criteria=s.success_criteria, 
+            context=[name for name in s.context if name in allowed_context],
+            final_output=s.final_output,
             status="pending", 
             attempts=0,
             result_summary=None, 

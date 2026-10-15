@@ -7,7 +7,7 @@ from app.engine.retry import plan_hash
 from app.engine.state_ops import (PlanError, apply_result, fallback_answer, ready_steps,
                                   validate_plan)
 from app.engine.tool_loop import run_step, run_tool_loop
-from app.engine.types import (ControllerDecision, InitialDecision, Plan, ReviewResult, RouteDecision,
+from app.engine.types import (InitialDecision, Plan, ReviewResult, RouteDecision,
                               RunState, StepResult, StepVerdict, StopRun)
 from app.engine.views import (build_view, clip, assemble, conversation_messages,
                               context_char_budget, task_ledger)
@@ -117,6 +117,7 @@ async def router_node(state: RunState, config: RunnableConfig) -> dict:
     system = "\n\n".join([
         get_prompt(ctx.config, "router"),
         "Choose a role and complete that role's work in this same response. For direct, provide the complete user-facing answer in answer. Choose plan when tools, knowledge retrieval, or multi-step work is needed; return executable steps and do not answer yet.",
+        "For planned work, set review_required only when an independent review is materially useful; default to false for routine tasks.",
         f"Direct role instructions:\n{get_prompt(ctx.config, 'direct')}",
         f"Planner role instructions:\n{get_prompt(ctx.config, 'planner', max_steps=ctx.config.limits.max_steps)}",
     ])
@@ -158,6 +159,7 @@ async def router_node(state: RunState, config: RunnableConfig) -> dict:
             await _publish_run_event(ctx.run_id, "node_complete", {"node": "router", "status": "direct"})
         else:
             result.update({"steps": state.get("steps", []) + new_steps,
+                           "review_required": decision.review_required,
                            "plan_hashes": state.get("plan_hashes", []) + [plan_hash(new_steps)]})
             await _publish_run_event(ctx.run_id, "plan_created", {
                 "steps": [{"id": step["id"], "tool": step.get("tools", []), "description": step.get("goal", "")}
@@ -275,6 +277,9 @@ async def planner_node(state: RunState, config: RunnableConfig) -> dict:
     
     result = {
         "steps": state.get("steps", []) + new_steps,
+        "review_required": bool(state.get("review_required") or plan.review_required),
+        "pending_replan": False,
+        "replan_reason": "",
         "plan_hashes": state.get("plan_hashes", []) + [plan_hash(new_steps)],
     }
     await _publish_run_event(ctx.run_id, "plan_created", {
@@ -374,62 +379,42 @@ async def executor_node(state: RunState, config: RunnableConfig) -> dict:
 
 # ---------------- adaptive controller ----------------
 async def controller_node(state: RunState, config: RunnableConfig) -> dict:
-    """Choose the next bounded workflow action from the current run state."""
+    """Schedule the next action from run state without spending an LLM call."""
     ctx = get_ctx(config)
     trace = get_trace_logger(ctx.run_id)
     from app.engine.runner import _publish_run_event
     trace.log_node_enter("CONTROLLER", state)
 
+    if state.get("stop_reason") in {"timeout", "budget", "cancelled", "unrecoverable"}:
+        return {"stop_reason": state["stop_reason"]}
     if reason := ctx.check_limits():
         trace.log_error(f"Controller stopped run: {reason}")
         return {"stop_reason": reason}
 
     steps = state.get("steps", [])
     ready = ready_steps(steps)
-    terminal = all(step.get("status") in {"done", "failed"} for step in steps)
+    terminal = bool(steps) and all(step.get("status") in {"done", "failed"} for step in steps)
     completed = [step for step in steps if step.get("status") == "done"]
     controller_iterations = state.get("controller_iterations", 0)
     max_iterations = ctx.config.limits.max_iterations
 
-    allowed = []
+    # Execute ready work first. A reviewer retry marks its step pending, while a
+    # reviewer replan leaves no ready work and sets pending_replan.
     if ready:
-        allowed.append("execute")
-    if terminal and completed and not state.get("review_complete", False):
-        allowed.append("verify")
-    if terminal or not steps:
-        allowed.append("finalize")
-    if controller_iterations < max_iterations:
-        allowed.append("replan")
-    allowed.append("ask_user")
-
-    user = assemble([
-        ("USER GOAL", state.get("goal", "")),
-        ("SHARED TASK LIST", task_ledger(state)),
-        ("READY STEPS", ", ".join(step.get("id", "") for step in ready) or "none"),
-        ("ALLOWED ACTIONS", ", ".join(allowed)),
-        ("REPLAN COUNT", f"{controller_iterations}/{max_iterations}"),
-        ("PREVIOUS REVIEW / REPLAN REASON", state.get("replan_reason", "")),
-    ], context_char_budget(ctx, 7000))
-    system = get_prompt(ctx.config, "controller")
-    messages = [SystemMessage(content=system), HumanMessage(content=user)]
-    decision: ControllerDecision = await llm.structured_call(
-        ctx, "reviewer", ControllerDecision, system, user
-    )
-    trace.log_llm_messages("controller", messages, decision)
-
-    action = decision.action
-    if action not in allowed:
-        # Treat model routing as a suggestion; state-derived policy remains authoritative.
-        action = (
-            "execute" if ready else
-            "verify" if terminal and completed else
-            "finalize" if terminal or not steps else
-            "replan" if "replan" in allowed else
-            "ask_user"
-        )
-        reason = f"Rejected unavailable action; selected {action} from current run state."
+        action, reason = "execute", f"{len(ready)} step(s) are ready."
+    elif state.get("pending_replan"):
+        if controller_iterations < max_iterations:
+            action, reason = "replan", state.get("replan_reason") or "Review requested a revised plan."
+        else:
+            action, reason = "finalize", "The replan limit was reached; presenting completed work and remaining gaps."
+    elif terminal and completed and state.get("review_required") and not state.get("review_complete", False):
+        action, reason = "verify", "The plan requested an independent review."
+    elif terminal or not steps:
+        action, reason = "finalize", "No executable steps remain."
+    elif controller_iterations < max_iterations:
+        action, reason = "replan", "No step is ready; revising the plan to resolve blocked dependencies."
     else:
-        reason = decision.reason or "No reason supplied."
+        action, reason = "finalize", "The replan limit was reached; presenting completed work and remaining gaps."
 
     result = {
         "controller_action": action,
@@ -439,9 +424,6 @@ async def controller_node(state: RunState, config: RunnableConfig) -> dict:
     }
     if action == "replan":
         result["controller_iterations"] = controller_iterations + 1
-    if action == "ask_user":
-        result["controller_question"] = decision.question or decision.reason or "What detail should I use to continue?"
-        result["stop_reason"] = "needs_input"
 
     trace.log_custom(f"Selected next action: {action} ({reason})")
     trace.log_node_exit("CONTROLLER", result)
@@ -569,6 +551,25 @@ async def finalize_node(state: RunState, config: RunnableConfig) -> dict:
     
     log.info(f"🎬 [FINALIZER] Creating final answer...")
     trace.log_custom(f"Finalizing with {len(state.get('steps', []))} steps")
+
+    steps = state.get("steps", [])
+    direct_outputs = [step for step in steps if step.get("final_output") and step.get("status") == "done"]
+    if (len(direct_outputs) == 1 and all(step.get("status") == "done" for step in steps)
+            and (not state.get("review_required") or state.get("review_complete"))):
+        step = direct_outputs[0]
+        artifact = ctx.artifacts.get(step.get("artifact_id") or "")
+        answer_text = (artifact.get("content") if artifact else "") or step.get("result_summary", "")
+        if answer_text:
+            await ctx.sink.emit("answer.delta", {"text": answer_text})
+            from app.engine.runner import _publish_run_event
+            await _publish_run_event(ctx.run_id, "answer.delta", {"text": answer_text})
+            await ctx.sink.emit("answer.done", {"text": answer_text})
+            result = {"status": "done", "answer": answer_text,
+                      "stop_reason": state.get("stop_reason"), "facts": state.get("facts", [])}
+            trace.log_node_exit("FINALIZER", {"fast_path": True, "answer_length": len(answer_text)})
+            trace.log_routing_decision("FINALIZER", "END", "Returned a complete executor output without another model call")
+            _log_timing("FINALIZER", start_time, ctx, {"answer_length": len(answer_text), "fast_path": True})
+            return result
     
     finalizer_prompt = get_prompt(ctx.config, "finalizer")
     system = f"{ctx.persona}\n\n{finalizer_prompt}"
@@ -579,7 +580,6 @@ async def finalize_node(state: RunState, config: RunnableConfig) -> dict:
             f"Ask the user this one focused question: {question} Do not claim the task is complete."
         )
     # Build the finalizer prompt
-    steps = state.get("steps", [])
     per_step = max(1500, 8000 // max(len(steps), 1))
     blocks = []
     for s in steps:
@@ -591,12 +591,10 @@ async def finalize_node(state: RunState, config: RunnableConfig) -> dict:
     stop = state.get("stop_reason") or "done"
     sections = [
         ("USER REQUEST", state["goal"]),
-        ("SHARED TASK LIST", task_ledger(state)),
         ("RUN STOPPED EARLY", f"reason: {stop}" if stop not in {"done", "needs_input"} else ""),
         ("QUESTION FOR USER", state.get("controller_question", "")
          if state.get("controller_action") == "ask_user" else ""),
         ("STEP RESULTS", "\n\n".join(blocks)),
-        ("FACTS", "\n".join(f"- {f}" for f in state.get("facts", []))),
     ]
     user = assemble(sections, context_char_budget(ctx, 10000))  # finalizer budget
     

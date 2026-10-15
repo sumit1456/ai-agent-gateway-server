@@ -29,6 +29,10 @@ class StepModel(BaseModel):
     kb_queries: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     success_criteria: str = ""
+    # Extra shared run context is opt-in. The step goal and declared inputs are
+    # always present; these fields allow a planner to request only what it needs.
+    context: list[str] = Field(default_factory=list)
+    final_output: bool = False
     status: Literal["pending", "running", "done", "failed"] = "pending"
     attempts: int = 0
     result_summary: str | None = None
@@ -48,6 +52,8 @@ class Step(TypedDict, total=False):
     kb_queries: list[str]
     depends_on: list[str]
     success_criteria: str
+    context: list[str]
+    final_output: bool
     status: str  # "pending" | "running" | "done" | "failed"
     attempts: int
     result_summary: str | None
@@ -73,6 +79,7 @@ class RunState(TypedDict, total=False):
     controller_action: str
     controller_reason: str
     controller_question: str | None
+    review_required: bool
     review_complete: bool
     plan_hashes: list[str]
     stop_reason: str | None
@@ -96,9 +103,12 @@ class PlanStep(BaseModel):
     kb_queries: list[str] = []
     depends_on: list[str] = []
     success_criteria: str = ""
+    context: list[str] = Field(default_factory=list, description="Optional shared context: goal, task_ledger, facts, variables")
+    final_output: bool = Field(default=False, description="True when this step's output is already ready to return to the user")
 
 class Plan(BaseModel):
     steps: list[PlanStep]
+    review_required: bool = Field(default=False, description="Whether completed work needs a separate reviewer")
 
 class InitialDecision(BaseModel):
     """Choose a role and complete its first unit of work in one model call."""
@@ -106,6 +116,7 @@ class InitialDecision(BaseModel):
     reason: str = ""
     answer: str = ""
     steps: list[PlanStep] = Field(default_factory=list)
+    review_required: bool = Field(default=False, description="Whether planned work needs a separate reviewer")
 
 class StepResult(BaseModel):
     status: Literal["done", "failed"]

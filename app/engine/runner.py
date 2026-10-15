@@ -332,6 +332,7 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
             "dead_ends": [],
             "iteration": 0,
             "controller_iterations": 0,
+            "review_required": False,
             "review_complete": False,
             "last_wave": [],
             "pending_replan": False,
