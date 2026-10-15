@@ -1,7 +1,7 @@
 from __future__ import annotations
 import httpx
-from typing import Dict, Any
-from pydantic import BaseModel, Field
+from typing import Any
+from pydantic import BaseModel, Field, create_model
 from app.tools.base import BaseTool, ToolResult
 from app.engine.context import RunContext
 
@@ -15,12 +15,27 @@ class WebhookToolInput(BaseModel):
 
 class WebhookTool(BaseTool):
     def __init__(self, name: str, description: str, endpoint_url: str, 
-                 auth_enc: str | None = None, timeout_ms: int = 10000):
+                 auth_enc: str | None = None, timeout_ms: int = 10000,
+                 input_schema: dict | None = None):
         self._name = name
         self._description = description
         self.endpoint_url = endpoint_url
         self.auth_enc = auth_enc
         self.timeout_ms = timeout_ms
+        self._input_schema = self._build_input_schema(input_schema or {})
+
+    @staticmethod
+    def _build_input_schema(schema: dict) -> type[BaseModel]:
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
+        type_map = {"string": str, "integer": int, "number": float, "boolean": bool, "object": dict, "array": list}
+        fields = {}
+        for name, definition in properties.items():
+            definition = definition if isinstance(definition, dict) else {}
+            field_type = type_map.get(definition.get("type"), Any)
+            default = ... if name in required else None
+            fields[name] = (field_type, Field(default, description=definition.get("description", "")))
+        return create_model("WebhookToolInput", **fields) if fields else WebhookToolInput
 
     @property
     def name(self) -> str:
@@ -32,7 +47,7 @@ class WebhookTool(BaseTool):
 
     @property
     def input_schema(self) -> type[BaseModel]:
-        return WebhookToolInput
+        return self._input_schema
 
     async def _execute(self, **kwargs) -> ToolResult:
         headers = {}

@@ -4,9 +4,19 @@ from app.security import current_user
 from app.db import get_db
 from app.models.tables import User, Tool
 from typing import List, Optional
+from pydantic import BaseModel, Field
 import uuid
 
 router = APIRouter()
+
+class ToolRegistration(BaseModel):
+    name: str
+    description: str
+    kind: str
+    endpoint_url: Optional[str] = None
+    auth_token: Optional[str] = None
+    input_schema: dict = Field(default_factory=dict)
+    timeout_ms: int = 10000
 
 @router.post("/", response_model=dict)
 async def register_tool(
@@ -237,25 +247,19 @@ async def delete_tool(
 
 @router.post("/register", response_model=dict)
 async def register_tool_alias(
-    name: str,
-    description: str,
-    kind: str,
-    endpoint_url: Optional[str] = None,
-    auth_token: Optional[str] = None,
-    input_schema: dict = {},
-    timeout_ms: int = 10000,
+    payload: ToolRegistration,
     current_user: User = Depends(current_user),
     db: Depends(get_db) = Depends(get_db)
 ):
     """Alias for register_tool to match the architecture documentation."""
     return await register_tool(
-        name=name,
-        description=description,
-        kind=kind,
-        endpoint_url=endpoint_url,
-        auth_token=auth_token,
-        input_schema=input_schema,
-        timeout_ms=timeout_ms,
+        name=payload.name,
+        description=payload.description,
+        kind=payload.kind,
+        endpoint_url=payload.endpoint_url,
+        auth_token=payload.auth_token,
+        input_schema=payload.input_schema,
+        timeout_ms=payload.timeout_ms,
         current_user=current_user,
         db=db
     )

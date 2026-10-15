@@ -201,6 +201,7 @@ def _register_user_tools(registry, tool_records) -> None:
                     endpoint_url=rec["endpoint_url"],
                     auth_enc=auth,
                     timeout_ms=rec["timeout_ms"],
+                    input_schema=rec.get("input_schema"),
                 ))
             elif rec["kind"] == "client":
                 registry.register(ClientTool(name=rec["name"], description=rec["description"]))
