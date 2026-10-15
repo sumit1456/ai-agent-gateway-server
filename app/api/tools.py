@@ -71,7 +71,6 @@ async def register_tool(
         "id": str(tool.id),
         "name": tool.name,
         "kind": tool.kind,
-        "created_at": tool.created_at.isoformat()
     }
 
 @router.get("/", response_model=List[dict])
@@ -93,7 +92,6 @@ async def list_tools(
             "kind": tool.kind,
             "endpoint_url": tool.endpoint_url,
             "timeout_ms": tool.timeout_ms,
-            "created_at": tool.created_at.isoformat()
         }
         for tool in tools
     ]
@@ -135,7 +133,6 @@ async def get_tool(
         "auth_enc": tool.auth_enc,  # In practice, we wouldn't return this
         "input_schema": tool.input_schema,
         "timeout_ms": tool.timeout_ms,
-        "created_at": tool.created_at.isoformat()
     }
 
 @router.put("/{tool_id}", response_model=dict)
@@ -194,8 +191,7 @@ async def update_tool(
     
     return {
         "id": str(tool.id),
-        "name": tool.name,
-        "updated_at": tool.created_at.isoformat()  # We don't have an updated_at field
+        "name": tool.name
     }
 
 @router.delete("/{tool_id}", response_model=dict)
