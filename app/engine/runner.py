@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import json
 from langchain_core.runnables import RunnableConfig
 from app.engine.context import RUNS, RunContext
 from app.engine.graph import build_graph
@@ -321,10 +322,10 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         from app.engine.types import RunState
         initial_state: RunState = {
             "run_id": run_id,
-            "input": ctx.input if hasattr(ctx, 'input') else "",
+            "input": ctx.input if isinstance(getattr(ctx, 'input', ''), str) else json.dumps(ctx.input, ensure_ascii=False, default=str),
             "variables": ctx.config.variables or {},
             "mode": "plan",
-            "goal": ctx.input if hasattr(ctx, 'input') else "",
+            "goal": ctx.input if isinstance(getattr(ctx, 'input', ''), str) else json.dumps(ctx.input, ensure_ascii=False, default=str),
             "steps": [],
             "facts": [],
             "artifacts": {},

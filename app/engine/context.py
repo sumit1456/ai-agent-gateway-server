@@ -120,6 +120,7 @@ class RunContext:
     persona: str                                  # rendered system prompt
     llm_factory: Callable[[str], "BaseChatModel"] # role -> chat model
     tools: "ToolRegistry"
+    input: object = ""
     retriever: "KnowledgeRetriever | None" = None
     kb_namespaces: list[str] = field(default_factory=list)
     conversation_summary: str = ""

@@ -92,6 +92,7 @@ async def list_tools(
             "kind": tool.kind,
             "endpoint_url": tool.endpoint_url,
             "timeout_ms": tool.timeout_ms,
+            "input_schema": tool.input_schema,
         }
         for tool in tools
     ]

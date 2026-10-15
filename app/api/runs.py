@@ -7,7 +7,7 @@ from app.db import get_db
 from app.models.tables import User, Run, Agent, AgentSession, ConversationMessage, WorkflowVersion, WorkflowRunStep
 from app.models.agent_config import AgentConfig
 from app.engine.runner import execute_run
-from typing import List, Optional
+from typing import Any, List, Optional
 import uuid
 import asyncio
 import json
@@ -20,7 +20,7 @@ router = APIRouter()
 
 class RunRequest(BaseModel):
     """Request model for creating a run."""
-    input: str = Field(..., min_length=1, max_length=10000, description="The input text for the agent")
+    input: Any = Field(..., description="Text or structured JSON input for the agent")
     variables: Optional[dict] = Field(default=None, description="Optional variables to pass to the agent")
     external_session_id: Optional[str] = Field(
         default=None, min_length=1, max_length=255,
@@ -143,6 +143,9 @@ async def create_run(
     }
     """
     input = payload.input
+    if not isinstance(input, (str, dict, list, int, float, bool)) or input is None:
+        raise HTTPException(status_code=400, detail="Input must be text or a JSON value")
+    input_text = input if isinstance(input, str) else json.dumps(input, ensure_ascii=False, separators=(",", ":"))
     variables = payload.variables
     end_user_id = x_end_user_id  # Use header value
     body_session_id = payload.external_session_id.strip() if payload.external_session_id else None
@@ -155,13 +158,13 @@ async def create_run(
     if external_session_id and len(external_session_id) > 255:
         raise HTTPException(status_code=400, detail="Session ID cannot exceed 255 characters")
     # Validate input
-    if not input or not input.strip():
+    if not input_text.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Input cannot be empty"
         )
     
-    if len(input) > 10000:
+    if len(input_text) > 10000:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Input too long (max 10,000 characters)"
@@ -296,7 +299,7 @@ async def create_run(
         session_id=session.id,
         workflow_version_id=agent.workflow_version_id,
         end_user_id=effective_end_user_id,  # Store end_user_id
-        input=input,
+        input=input_text,
         variables=variables or {},
         status="running"
     )
@@ -307,7 +310,7 @@ async def create_run(
         session_id=session.id,
         run_id=uuid.UUID(run_id),
         role="user",
-        content=input,
+        content=input_text,
     ))
     # Advance the durable history cache generation atomically with the message.
     from sqlalchemy import update
