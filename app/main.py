@@ -4,9 +4,8 @@ Main FastAPI application entry point.
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio
 import time
-from app.api import auth, providers, agents, tools, knowledge, runs, workflows, webhooks
+from app.api import auth, providers, agents, tools, knowledge, runs, workflows
 from app.config import settings
 from app.db import init_db
 from app.logging_config import setup_logging, get_logger
@@ -17,7 +16,6 @@ setup_logging()
 logger = get_logger(__name__)
 
 app = FastAPI(title="AI Agent Gateway", version="0.1.0")
-_webhook_worker_task: asyncio.Task | None = None
 
 # Configure CORS
 app.add_middleware(
@@ -57,7 +55,6 @@ app.include_router(workflows.router, prefix="/v1/workflows", tags=["workflows"])
 app.include_router(tools.router, prefix="/v1/tools", tags=["tools"])
 app.include_router(knowledge.router, prefix="/v1/knowledge-bases", tags=["knowledge"])
 app.include_router(runs.router, prefix="/v1", tags=["runs"])
-app.include_router(webhooks.router, prefix="/v1/webhooks", tags=["webhooks"])
 
 @app.on_event("startup")
 async def startup_event():
@@ -70,11 +67,6 @@ async def startup_event():
         logger.exception("PostgreSQL startup check failed; application startup aborted")
         raise
     logger.info("PostgreSQL connection successful; database schema is ready")
-
-    global _webhook_worker_task
-    from app.webhooks import delivery_worker
-    _webhook_worker_task = asyncio.create_task(delivery_worker(), name="webhook-delivery-worker")
-    logger.info("Webhook delivery worker started")
 
     if not settings.redis_url:
         logger.info("Redis is not configured (REDIS_URL is empty); live SSE streaming is disabled")
@@ -92,12 +84,6 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Close shared Redis resources on shutdown."""
-    if _webhook_worker_task:
-        _webhook_worker_task.cancel()
-        try:
-            await _webhook_worker_task
-        except asyncio.CancelledError:
-            pass
     await close_redis()
     logger.info("AI Agent Gateway shutdown complete")
 

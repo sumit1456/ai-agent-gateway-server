@@ -127,10 +127,8 @@ async def create_run(
     """
     Create a new run for an agent.
     
-    Returns immediately with run_id and status='running'.
-    Returns immediately with a run_id. When a result webhook is configured,
-    the terminal result is delivered there after it is committed to Postgres.
-    GET /v1/runs/{run_id} remains available for troubleshooting and recovery.
+    Returns immediately with run_id and status='running'. Subscribe to the
+    authenticated run stream for progress and terminal results.
     
     Headers (optional):
         X-End-User-ID: Identifier for your end-user (for multi-tenant tracking)
@@ -336,7 +334,7 @@ async def create_run(
         "run_id": run_id,
         "session_id": str(session.id),
         "status": "running",
-        "message": "Run accepted. The result will be sent to your configured webhook when complete."
+        "message": "Run accepted. Subscribe to the run stream for progress and results."
     }
 
 @router.get("/runs/{run_id}", response_model=dict)
