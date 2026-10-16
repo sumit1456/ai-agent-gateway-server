@@ -575,6 +575,7 @@ async def stream_run_updates(
 
     async def event_generator():
         try:
+            from app.services.redis_trace import measure_redis
             logger.info("SSE client subscribed to %s", channel)
             yield f"event: connected\ndata: {json.dumps({'run_id': run_id, 'status': run_status})}\n\n"
 
@@ -601,7 +602,9 @@ async def stream_run_updates(
             if terminal:
                 # Replay retained events for completed runs, then send a DB
                 # snapshot as a fallback for older runs or Redis write errors.
-                entries = await redis_client.xrange(channel, min="-", max="+")
+                entries = await measure_redis(
+                    "stream.xrange", lambda: redis_client.xrange(channel, min="-", max="+")
+                )
                 cursor_tuple = tuple(map(int, cursor.split("-", 1)))
                 saw_terminal_event = False
                 for stream_id, fields in entries:
@@ -625,8 +628,10 @@ async def stream_run_updates(
                 return
 
             while loop.time() < deadline:
-                streams = await redis_client.xread(
-                    {channel: stream_cursor}, count=100, block=1000
+                streams = await measure_redis(
+                    "stream.xread", lambda: redis_client.xread(
+                        {channel: stream_cursor}, count=100, block=1000
+                    ), "block_ms=1000"
                 )
                 if not streams:
                     yield ": keepalive\n\n"

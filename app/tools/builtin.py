@@ -453,10 +453,14 @@ class GetConversationHistoryTool(BaseTool):
             redis_client = None
             try:
                 from app.redis_client import get_redis
+                from app.services.redis_trace import measure_redis
                 redis_client = await asyncio.wait_for(get_redis(), timeout=0.2)
                 if redis_client:
                     cache_value_key = f"history:v2:result:{session_key}:{history_version}:{digest}"
-                    cached = await asyncio.wait_for(redis_client.get(cache_value_key), timeout=0.2)
+                    cached = await measure_redis(
+                        "cache.conversation_history.get",
+                        lambda: asyncio.wait_for(redis_client.get(cache_value_key), timeout=0.2),
+                    )
                     if cached is not None:
                         return ToolResult(ok=True, output=cached)
             except Exception as cache_exc:
@@ -502,7 +506,11 @@ class GetConversationHistoryTool(BaseTool):
                     output = output[:16000] + "\n\n[History output truncated at 16000 characters.]"
             if redis_client and cache_value_key:
                 try:
-                    await asyncio.wait_for(redis_client.set(cache_value_key, output, ex=30), timeout=0.2)
+                    from app.services.redis_trace import measure_redis
+                    await measure_redis(
+                        "cache.conversation_history.set",
+                        lambda: asyncio.wait_for(redis_client.set(cache_value_key, output, ex=30), timeout=0.2),
+                    )
                 except Exception as cache_exc:
                     log.debug("Conversation history cache write failed: %s", cache_exc)
             return ToolResult(ok=True, output=output)

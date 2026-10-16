@@ -4,10 +4,12 @@ Used for real-time streaming of agent execution events.
 """
 import asyncio
 import json
+import time
 import redis.asyncio as redis
 from typing import Optional
 from app.config import settings
 from app.logging_config import get_logger
+from app.services.redis_trace import log_redis_operation, measure_redis
 
 logger = get_logger(__name__)
 
@@ -41,7 +43,7 @@ async def get_redis() -> Optional[redis.Redis]:
                 health_check_interval=30
             )
             # Test connection
-            await _redis_client.ping()
+            await measure_redis("connection.ping", _redis_client.ping)
             logger.info("Redis connection established")
         except Exception as e:
             logger.warning(f"Redis connection failed: {e}. SSE streaming will be unavailable.")
@@ -59,7 +61,7 @@ async def close_redis():
     """Close Redis connection on shutdown."""
     global _redis_client
     if _redis_client:
-        await _redis_client.aclose()
+        await measure_redis("connection.close", _redis_client.aclose)
         _redis_client = None
         logger.info("Redis connection closed")
 
@@ -76,8 +78,10 @@ async def publish_event(channel: str, event_type: str, data: dict) -> bool:
     Returns:
         True if published successfully, False if Redis unavailable
     """
-    client = await get_redis()
+    publish_started = time.perf_counter()
+    client = await measure_redis("connection.lookup", get_redis, f"event={event_type}")
     if not client:
+        log_redis_operation("stream.publish", (time.perf_counter() - publish_started) * 1000, "unavailable", f"event={event_type}")
         return False
 
     try:
@@ -90,11 +94,17 @@ async def publish_event(channel: str, event_type: str, data: dict) -> bool:
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
-        await client.xadd(channel, {"event": message}, maxlen=1000, approximate=True)
+        await measure_redis(
+            "stream.xadd",
+            lambda: client.xadd(channel, {"event": message}, maxlen=1000, approximate=True),
+            f"event={event_type}",
+        )
         # Keep enough history for reconnecting clients without retaining runs forever.
-        await client.expire(channel, 86400)
+        await measure_redis("stream.expire", lambda: client.expire(channel, 86400), f"event={event_type}")
+        log_redis_operation("stream.publish", (time.perf_counter() - publish_started) * 1000, "ok", f"event={event_type}")
         return True
     except Exception as e:
+        log_redis_operation("stream.publish", (time.perf_counter() - publish_started) * 1000, f"error:{type(e).__name__}", f"event={event_type}")
         logger.error(f"Failed to publish event to {channel}: {e}")
         return False
 
@@ -109,8 +119,9 @@ async def get_agent_prompt_config(user_id: str, agent_id: str) -> dict | None:
         client = await asyncio.wait_for(get_redis(), timeout=0.2)
         if not client:
             return None
-        value = await asyncio.wait_for(
-            client.get(_agent_prompt_config_key(user_id, agent_id)), timeout=0.2
+        value = await measure_redis(
+            "cache.prompt_config.get",
+            lambda: asyncio.wait_for(client.get(_agent_prompt_config_key(user_id, agent_id)), timeout=0.2),
         )
         if not value:
             return None
@@ -126,13 +137,16 @@ async def set_agent_prompt_config(user_id: str, agent_id: str, config: dict) -> 
     try:
         client = await asyncio.wait_for(get_redis(), timeout=0.2)
         if client:
-            await asyncio.wait_for(
-                client.set(
-                    _agent_prompt_config_key(user_id, agent_id),
-                    json.dumps(config),
-                    ex=AGENT_PROMPT_CONFIG_TTL_SECONDS,
+            await measure_redis(
+                "cache.prompt_config.set",
+                lambda: asyncio.wait_for(
+                    client.set(
+                        _agent_prompt_config_key(user_id, agent_id),
+                        json.dumps(config),
+                        ex=AGENT_PROMPT_CONFIG_TTL_SECONDS,
+                    ),
+                    timeout=0.2,
                 ),
-                timeout=0.2,
             )
     except Exception as exc:
         logger.debug("Could not write prompt config cache for agent %s: %s", agent_id, exc)
@@ -143,8 +157,9 @@ async def invalidate_agent_prompt_config(user_id: str, agent_id: str) -> None:
     try:
         client = await asyncio.wait_for(get_redis(), timeout=0.2)
         if client:
-            await asyncio.wait_for(
-                client.delete(_agent_prompt_config_key(user_id, agent_id)), timeout=0.2
+            await measure_redis(
+                "cache.prompt_config.delete",
+                lambda: asyncio.wait_for(client.delete(_agent_prompt_config_key(user_id, agent_id)), timeout=0.2),
             )
     except Exception as exc:
         logger.debug("Could not invalidate prompt config cache for agent %s: %s", agent_id, exc)
@@ -164,8 +179,9 @@ async def get_agent_execution_config(user_id: str, agent_id: str | None) -> dict
         client = await asyncio.wait_for(get_redis(), timeout=0.2)
         if not client:
             return None
-        value = await asyncio.wait_for(
-            client.hget(_agent_execution_config_key(user_id), str(agent_id)), timeout=0.2
+        value = await measure_redis(
+            "cache.execution_config.hget",
+            lambda: asyncio.wait_for(client.hget(_agent_execution_config_key(user_id), str(agent_id)), timeout=0.2),
         )
         cached = json.loads(value) if value else None
         return cached if isinstance(cached, dict) else None
@@ -187,7 +203,7 @@ async def set_agent_execution_config(
             async with client.pipeline(transaction=False) as pipe:
                 pipe.hset(key, str(agent_id), json.dumps(config))
                 pipe.expire(key, AGENT_EXECUTION_CONFIG_TTL_SECONDS)
-                await asyncio.wait_for(pipe.execute(), timeout=0.2)
+                await measure_redis("cache.execution_config.pipeline", lambda: asyncio.wait_for(pipe.execute(), timeout=0.2))
     except Exception as exc:
         logger.debug("Could not write run config cache for agent %s: %s", agent_id, exc)
 
@@ -197,7 +213,10 @@ async def invalidate_agent_execution_configs(user_id: str) -> None:
     try:
         client = await asyncio.wait_for(get_redis(), timeout=0.2)
         if client:
-            await asyncio.wait_for(client.delete(_agent_execution_config_key(user_id)), timeout=0.2)
+            await measure_redis(
+                "cache.execution_config.delete",
+                lambda: asyncio.wait_for(client.delete(_agent_execution_config_key(user_id)), timeout=0.2),
+            )
     except Exception as exc:
         logger.debug("Could not invalidate run config cache for user %s: %s", user_id, exc)
 
