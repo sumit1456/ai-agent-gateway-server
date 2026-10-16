@@ -4,9 +4,10 @@ from pydantic import BaseModel
 from sqlmodel import select
 from app.security import current_user, decrypt, encrypt
 from app.db import get_db
-from app.models.tables import User, KnowledgeBase, KbDocument, Provider
+from app.models.tables import User, KnowledgeBase, KbDocument, Provider, Agent
 from app.knowledge.ingest import ingest_document
 from typing import List, Optional
+from datetime import datetime, timezone
 import uuid
 
 router = APIRouter()
@@ -177,7 +178,7 @@ async def get_knowledge_base(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Knowledge base not found"
         )
-    
+
     return {
         "id": str(kb.id),
         "name": kb.name,
@@ -318,6 +319,20 @@ async def delete_knowledge_base(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Knowledge base not found"
         )
+
+    agents_result = await db.exec(select(Agent).where(Agent.user_id == current_user.id))
+    affected_agents = []
+    kb_id = str(kb.id)
+    for agent in agents_result.all():
+        config = dict(agent.config or {})
+        configured_ids = config.get("knowledge_base_ids")
+        if not isinstance(configured_ids, list) or kb_id not in {str(value) for value in configured_ids}:
+            continue
+        config["knowledge_base_ids"] = [value for value in configured_ids if str(value) != kb_id]
+        agent.config = config
+        agent.updated_at = datetime.now(timezone.utc)
+        db.add(agent)
+        affected_agents.append(agent)
     
     # Remove vectors and document rows before deleting the parent KB. The
     # namespace is unique to this KB, so delete_all cannot affect another KB.
@@ -336,11 +351,14 @@ async def delete_knowledge_base(
 
     await db.delete(kb)
     await db.commit()
-    from app.redis_client import invalidate_agent_execution_configs
+    from app.redis_client import invalidate_agent_execution_configs, invalidate_agent_prompt_config
+    for agent in affected_agents:
+        await invalidate_agent_prompt_config(str(current_user.id), str(agent.id))
     await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
-        "message": f"Knowledge base {kb_id} deleted successfully"
+        "message": f"Knowledge base {kb_id} deleted successfully",
+        "agents_updated": len(affected_agents),
     }
 
 @router.post("/{kb_id}/documents", response_model=dict)

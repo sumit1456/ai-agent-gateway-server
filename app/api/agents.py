@@ -74,6 +74,8 @@ async def create_agent(
     agent_data = config.model_dump(mode="json")
     agent_data["provider_id"] = str(provider.id)
     workflow_version = await _get_owned_workflow_version(db, current_user.id, config.workflow_version_id)
+    agent_data["workflow_version_id"] = str(workflow_version.id) if workflow_version else None
+    agent_data["workflow_definition"] = workflow_version.definition if workflow_version else None
 
     # Create the agent
     agent = Agent(
@@ -204,6 +206,8 @@ async def update_agent(
     agent.name = config.name
     agent_data = config.model_dump(mode="json")
     agent_data["provider_id"] = str(provider.id)
+    agent_data["workflow_version_id"] = str(workflow_version.id) if workflow_version else None
+    agent_data["workflow_definition"] = workflow_version.definition if workflow_version else None
     agent.config = agent_data
     agent.updated_at = datetime.now(timezone.utc)  # Update timestamp
     

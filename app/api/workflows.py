@@ -127,8 +127,12 @@ async def update_workflow(workflow_id: str, payload: WorkflowUpdate, current_use
         linked_agents = linked_agents.all()
         for agent in linked_agents:
             agent.workflow_version_id = version.id
-            if isinstance(agent.config, dict):
-                agent.config = {**agent.config, "workflow_version_id": str(version.id)}
+            agent.config = {
+                **(agent.config if isinstance(agent.config, dict) else {}),
+                "workflow_version_id": str(version.id),
+                "workflow_definition": version.definition,
+            }
+            agent.updated_at = datetime.now(timezone.utc)
             db.add(agent)
     await db.commit()
     if previous and linked_agents:
@@ -200,8 +204,12 @@ async def delete_workflow(workflow_id: str, current_user: User = Depends(current
 
             for agent in linked_agents:
                 agent.workflow_version_id = default_version.id
-                if isinstance(agent.config, dict):
-                    agent.config = {**agent.config, "workflow_version_id": str(default_version.id)}
+                agent.config = {
+                    **(agent.config if isinstance(agent.config, dict) else {}),
+                    "workflow_version_id": str(default_version.id),
+                    "workflow_definition": default_version.definition,
+                }
+                agent.updated_at = datetime.now(timezone.utc)
                 db.add(agent)
 
         # Keep run records and step traces intact while releasing the version

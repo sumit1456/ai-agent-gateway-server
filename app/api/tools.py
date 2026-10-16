@@ -2,11 +2,68 @@ from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlmodel import select
 from app.security import current_user
 from app.db import get_db
-from app.models.tables import User, Tool
+from app.models.tables import User, Tool, Agent, Workflow, WorkflowVersion
 from typing import List, Optional
+from copy import deepcopy
+from datetime import datetime, timezone
 import uuid
 
 router = APIRouter()
+
+
+def _without_tool(definition: dict, tool_name: str) -> tuple[dict, bool]:
+    """Return a workflow definition with the deleted tool removed from node lists."""
+    cleaned = deepcopy(definition)
+    changed = False
+    for node in cleaned.get("nodes", []):
+        node_tools = node.get("tools")
+        if isinstance(node_tools, list) and tool_name in node_tools:
+            node["tools"] = [name for name in node_tools if name != tool_name]
+            changed = True
+    return cleaned, changed
+
+
+def _rename_tool(definition: dict, old_name: str, new_name: str) -> tuple[dict, bool]:
+    cleaned = deepcopy(definition)
+    changed = False
+    for node in cleaned.get("nodes", []):
+        node_tools = node.get("tools")
+        if isinstance(node_tools, list) and old_name in node_tools:
+            node["tools"] = [new_name if name == old_name else name for name in node_tools]
+            changed = True
+    return cleaned, changed
+
+
+def _agent_config_without_tool(config: dict, tool_name: str) -> tuple[dict, bool]:
+    cleaned = deepcopy(config or {})
+    changed = False
+    configured_tools = cleaned.get("tools")
+    if isinstance(configured_tools, list) and tool_name in configured_tools:
+        cleaned["tools"] = [name for name in configured_tools if name != tool_name]
+        changed = True
+    workflow_definition = cleaned.get("workflow_definition")
+    if isinstance(workflow_definition, dict):
+        cleaned_definition, definition_changed = _without_tool(workflow_definition, tool_name)
+        if definition_changed:
+            cleaned["workflow_definition"] = cleaned_definition
+            changed = True
+    return cleaned, changed
+
+
+def _agent_config_renamed_tool(config: dict, old_name: str, new_name: str) -> tuple[dict, bool]:
+    cleaned = deepcopy(config or {})
+    changed = False
+    configured_tools = cleaned.get("tools")
+    if isinstance(configured_tools, list) and old_name in configured_tools:
+        cleaned["tools"] = [new_name if name == old_name else name for name in configured_tools]
+        changed = True
+    workflow_definition = cleaned.get("workflow_definition")
+    if isinstance(workflow_definition, dict):
+        renamed_definition, definition_changed = _rename_tool(workflow_definition, old_name, new_name)
+        if definition_changed:
+            cleaned["workflow_definition"] = renamed_definition
+            changed = True
+    return cleaned, changed
 
 @router.post("/", response_model=dict)
 async def register_tool(
@@ -170,6 +227,62 @@ async def update_tool(
             detail="Tool not found"
         )
     
+    old_name = tool.name
+    if name is not None:
+        name = name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Tool name cannot be empty")
+        existing_result = await db.exec(select(Tool).where(
+            Tool.user_id == current_user.id, Tool.name == name, Tool.id != tool.id
+        ))
+        if existing_result.first():
+            raise HTTPException(status_code=400, detail=f"Tool '{name}' already exists")
+
+    affected_agents = []
+    if name is not None and name != old_name:
+        workflow_result = await db.exec(
+            select(Workflow, WorkflowVersion)
+            .join(WorkflowVersion, WorkflowVersion.workflow_id == Workflow.id)
+            .where(Workflow.user_id == current_user.id, WorkflowVersion.is_active == True)
+        )
+        successors = {}
+        for workflow, active_version in workflow_result.all():
+            renamed, changed = _rename_tool(active_version.definition or {}, old_name, name)
+            if not changed:
+                continue
+            active_version.is_active = False
+            successor = WorkflowVersion(workflow_id=workflow.id, version=active_version.version + 1, definition=renamed)
+            workflow.updated_at = datetime.now(timezone.utc)
+            db.add(active_version)
+            db.add(successor)
+            db.add(workflow)
+            await db.flush()
+            successors[workflow.id] = successor
+
+        if successors:
+            versions_result = await db.exec(select(WorkflowVersion).where(WorkflowVersion.workflow_id.in_(successors)))
+            successor_by_version = {
+                version.id: successors[version.workflow_id]
+                for version in versions_result.all()
+            }
+        else:
+            successor_by_version = {}
+        agents_result = await db.exec(select(Agent).where(Agent.user_id == current_user.id))
+        for agent in agents_result.all():
+            updated_config, changed = _agent_config_renamed_tool(agent.config, old_name, name)
+            successor = successor_by_version.get(agent.workflow_version_id)
+            if successor:
+                agent.workflow_version_id = successor.id
+                updated_config["workflow_version_id"] = str(successor.id)
+                if "workflow_definition" in updated_config:
+                    updated_config["workflow_definition"] = successor.definition
+                changed = True
+            if changed:
+                agent.config = updated_config
+                agent.updated_at = datetime.now(timezone.utc)
+                db.add(agent)
+                affected_agents.append(agent)
+
     # Update fields if provided
     if name is not None:
         tool.name = name
@@ -187,7 +300,9 @@ async def update_tool(
     db.add(tool)
     await db.commit()
     await db.refresh(tool)
-    from app.redis_client import invalidate_agent_execution_configs
+    from app.redis_client import invalidate_agent_execution_configs, invalidate_agent_prompt_config
+    for agent in affected_agents:
+        await invalidate_agent_prompt_config(str(current_user.id), str(agent.id))
     await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
@@ -223,13 +338,71 @@ async def delete_tool(
             detail="Tool not found"
         )
     
+    # Create new versions for active workflows that reference the deleted tool.
+    workflow_result = await db.exec(
+        select(Workflow, WorkflowVersion)
+        .join(WorkflowVersion, WorkflowVersion.workflow_id == Workflow.id)
+        .where(Workflow.user_id == current_user.id, WorkflowVersion.is_active == True)
+    )
+    affected_workflows: dict[uuid.UUID, tuple[Workflow, WorkflowVersion, WorkflowVersion]] = {}
+    for workflow, active_version in workflow_result.all():
+        cleaned_definition, changed = _without_tool(active_version.definition or {}, tool.name)
+        if not changed:
+            continue
+        active_version.is_active = False
+        db.add(active_version)
+        next_version = WorkflowVersion(
+            workflow_id=workflow.id,
+            version=active_version.version + 1,
+            definition=cleaned_definition,
+        )
+        workflow.updated_at = datetime.now(timezone.utc)
+        db.add(workflow)
+        db.add(next_version)
+        await db.flush()
+        affected_workflows[workflow.id] = (workflow, active_version, next_version)
+
+    agents_result = await db.exec(select(Agent).where(Agent.user_id == current_user.id))
+    agents = agents_result.all()
+    affected_agents: list[Agent] = []
+    affected_workflow_ids = set(affected_workflows)
+    version_to_successor: dict[uuid.UUID, WorkflowVersion] = {}
+    if affected_workflow_ids:
+        version_result = await db.exec(
+            select(WorkflowVersion).where(WorkflowVersion.workflow_id.in_(affected_workflow_ids))
+        )
+        workflow_id_by_version = {version.id: version.workflow_id for version in version_result.all()}
+        for workflow_id, (_, _, successor) in affected_workflows.items():
+            for version_id, linked_workflow_id in workflow_id_by_version.items():
+                if linked_workflow_id == workflow_id:
+                    version_to_successor[version_id] = successor
+
+    for agent in agents:
+        updated_config, config_changed = _agent_config_without_tool(agent.config, tool.name)
+        successor = version_to_successor.get(agent.workflow_version_id)
+        if successor:
+            agent.workflow_version_id = successor.id
+            updated_config["workflow_version_id"] = str(successor.id)
+            if "workflow_definition" in updated_config:
+                updated_config["workflow_definition"] = successor.definition
+            config_changed = True
+        if config_changed:
+            agent.config = updated_config
+            agent.updated_at = datetime.now(timezone.utc)
+            db.add(agent)
+            affected_agents.append(agent)
+
     await db.delete(tool)
     await db.commit()
-    from app.redis_client import invalidate_agent_execution_configs
+    from app.redis_client import invalidate_agent_execution_configs, invalidate_agent_prompt_config
+    for agent in affected_agents:
+        await invalidate_agent_prompt_config(str(current_user.id), str(agent.id))
     await invalidate_agent_execution_configs(str(current_user.id))
     
     return {
-        "message": f"Tool {tool_id} deleted successfully"
+        "message": f"Tool {tool_id} deleted successfully",
+        "agents_updated": len(affected_agents),
+        "workflows_updated": len(affected_workflows),
     }
 
 @router.post("/register", response_model=dict)

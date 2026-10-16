@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime, timezone
 from typing import List, Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -271,7 +272,8 @@ async def delete_provider(
             Agent.provider_id == provider.id,
         )
     )
-    for agent in agents_result.all():
+    deleted_agents = agents_result.all()
+    for agent in deleted_agents:
         runs_result = await db.exec(
             select(Run).where(Run.agent_id == agent.id)
         )
@@ -298,7 +300,8 @@ async def delete_provider(
             KnowledgeBase.provider_id == provider.id,
         )
     )
-    for kb in kbs_result.all():
+    deleted_kbs = kbs_result.all()
+    for kb in deleted_kbs:
         from app.knowledge.retriever import KnowledgeRetriever
         retriever = KnowledgeRetriever(
             api_key=decrypt(kb.vector_api_key_enc) if kb.vector_api_key_enc else None,
@@ -312,9 +315,30 @@ async def delete_provider(
             await db.delete(doc)
         await db.delete(kb)
 
+    deleted_kb_ids = {str(kb.id) for kb in deleted_kbs}
+    affected_agents = []
+    if deleted_kb_ids:
+        remaining_agents_result = await db.exec(
+            select(Agent).where(Agent.user_id == current_user.id, Agent.provider_id != provider.id)
+        )
+        for agent in remaining_agents_result.all():
+            config = dict(agent.config or {})
+            configured_ids = config.get("knowledge_base_ids")
+            if not isinstance(configured_ids, list) or not any(str(value) in deleted_kb_ids for value in configured_ids):
+                continue
+            config["knowledge_base_ids"] = [value for value in configured_ids if str(value) not in deleted_kb_ids]
+            agent.config = config
+            agent.updated_at = datetime.now(timezone.utc)
+            db.add(agent)
+            affected_agents.append(agent)
+
     await db.delete(provider)
     await db.commit()
-    from app.redis_client import invalidate_agent_execution_configs
+    from app.redis_client import invalidate_agent_execution_configs, invalidate_agent_prompt_config
+    for agent in deleted_agents:
+        await invalidate_agent_prompt_config(str(current_user.id), str(agent.id))
+    for agent in affected_agents:
+        await invalidate_agent_prompt_config(str(current_user.id), str(agent.id))
     await invalidate_agent_execution_configs(str(current_user.id))
 
     return {"message": f"Provider {provider_id} deleted successfully"}
