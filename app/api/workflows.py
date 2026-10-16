@@ -124,12 +124,18 @@ async def update_workflow(workflow_id: str, payload: WorkflowUpdate, current_use
     await db.flush()
     if previous:
         linked_agents = await db.exec(select(Agent).where(Agent.workflow_version_id == previous.id))
-        for agent in linked_agents.all():
+        linked_agents = linked_agents.all()
+        for agent in linked_agents:
             agent.workflow_version_id = version.id
             if isinstance(agent.config, dict):
                 agent.config = {**agent.config, "workflow_version_id": str(version.id)}
             db.add(agent)
     await db.commit()
+    if previous and linked_agents:
+        from app.redis_client import invalidate_agent_prompt_config
+
+        for agent in linked_agents:
+            await invalidate_agent_prompt_config(str(current_user.id), str(agent.id))
     await db.refresh(version)
     return _version_payload(workflow, version)
 
@@ -218,6 +224,11 @@ async def delete_workflow(workflow_id: str, current_user: User = Depends(current
             db.add(run)
     await db.delete(workflow)
     await db.commit()
+    if linked_agents:
+        from app.redis_client import invalidate_agent_prompt_config
+
+        for agent in linked_agents:
+            await invalidate_agent_prompt_config(str(current_user.id), str(agent.id))
     return {
         "ok": True,
         "agents_reassigned": len(linked_agents),
