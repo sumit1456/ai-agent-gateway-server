@@ -4,7 +4,9 @@ Logging configuration with Windows Unicode support.
 import logging
 import sys
 import io
+import os
 from app.services.log_paths import get_log_dir
+from app.config import settings
 
 
 def setup_logging():
@@ -12,6 +14,17 @@ def setup_logging():
     Configure logging with UTF-8 encoding for Windows compatibility.
     This handles emoji and Unicode characters in log messages.
     """
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    if not settings.gateway_logging_enabled:
+        root_logger.setLevel(logging.CRITICAL + 1)
+        logging.disable(logging.CRITICAL)
+        # Silence legacy print statements and server access logs as well.
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+        return root_logger
+
+    logging.disable(logging.NOTSET)
     # Create formatter
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
@@ -42,11 +55,7 @@ def setup_logging():
     stream_handler.setFormatter(formatter)
     
     # Configure root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    
-    # Remove any existing handlers
-    root_logger.handlers.clear()
+    root_logger.setLevel(settings.log_level.upper())
     
     # Add our handlers
     root_logger.addHandler(stream_handler)

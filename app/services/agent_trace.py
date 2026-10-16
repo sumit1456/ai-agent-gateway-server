@@ -4,7 +4,6 @@ Trace Logger - Detailed execution trace for debugging agent pipeline
 Writes a human-readable trace file showing exactly what the agent is doing.
 """
 import json
-import os
 import re
 import threading
 import time
@@ -12,16 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 from app.services.log_paths import get_log_dir
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
+from app.config import settings
 
 
 # Flip these switches to control trace detail and startup profiling independently.
-AGENT_TRACE_ENABLED = _env_bool("AGENT_TRACE_ENABLED", True)
-STARTUP_TRACE_ENABLED = _env_bool("STARTUP_TRACE_ENABLED", True)
+AGENT_TRACE_ENABLED = settings.agent_trace_enabled
+STARTUP_TRACE_ENABLED = settings.startup_trace_enabled
 _startup_log_lock = threading.Lock()
 _startup_log_sequence = 0
 

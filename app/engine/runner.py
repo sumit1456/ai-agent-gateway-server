@@ -52,6 +52,8 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     from app.services.agent_trace import get_trace_logger
 
     trace = get_trace_logger(run_id)
+    from app.services.detailed_trace import get_detailed_trace_logger
+    detailed_trace = get_detailed_trace_logger(run_id)
     config_started = time.perf_counter()
     config = AgentConfig(**config_dict)
     vars_dict = variables or {}
@@ -61,6 +63,7 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
         persona = config.system_prompt
     from app.services.agent_trace import log_startup_timing
     log_startup_timing(trace, "agent_config_and_persona", config_started)
+    detailed_trace.record("rendered_system_persona", {"persona": persona, "variables": vars_dict})
 
     provider_obj = None
     decrypted_api_key = ""
@@ -110,12 +113,12 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
             try:
                 provider_obj = get_provider(provider_record["provider"])
                 decrypted_api_key = decrypt(provider_record["api_key_enc"])
-                print(f"✓ Resolved provider: {provider_record['provider']} (ID: {provider_record['id']})")
-                print(f"✓ API key loaded: {decrypted_api_key[:8]}..." if decrypted_api_key else "✗ No API key")
+                log.debug("Resolved provider %s with ID %s", provider_record["provider"], provider_record["id"])
+                log.debug("Provider credential loaded")
             except Exception as e:
-                print(f"Error initializing provider {provider_record.get('provider')}: {e}")
+                log.debug("Provider initialization failed: %s", e)
         else:
-            print(f"✗ Provider not found for config.provider_id={config.provider_id}, user_id={uid}")
+            log.debug("Provider not found for config.provider_id=%s", config.provider_id)
 
         knowledge_bases = execution_config.get("knowledge_bases", [])
         if knowledge_bases:
@@ -139,10 +142,10 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
                 error_msg += "Provider not configured"
             elif not decrypted_api_key:
                 error_msg += "API key not available"
-            print(f"✗ {error_msg}")
+            log.debug("Cannot initialize model for role %s: %s", role, error_msg)
             raise ValueError(error_msg)
         model_name = getattr(config.models, role, None) or config.models.executor
-        print(f"✓ Creating {role} LLM: {model_name} using {provider_obj.provider_id}")
+        log.debug("Creating %s model %s using provider %s", role, model_name, provider_obj.provider_id)
         model_started = time.perf_counter()
         model = provider_obj.get_chat_model(
             model=model_name,
@@ -174,6 +177,13 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
         end_user_id=end_user_id,
         conversation_namespace=conversation_namespace,
     )
+    detailed_trace.record("agent_runtime_context", {
+        "conversation_summary": conversation_summary,
+        "session_task_state": session_task_state,
+        "knowledge_namespaces": kb_namespaces,
+        "tool_names": config.tools,
+        "models": config.models.model_dump(mode="json"),
+    })
 
     tool_setup_started = time.perf_counter()
     # 4. Register builtin gateway tools (ctx-aware)
@@ -219,7 +229,7 @@ def _register_user_tools(registry, tool_records) -> None:
             elif rec["kind"] == "client":
                 registry.register(ClientTool(name=rec["name"], description=rec["description"]))
         except Exception as exc:
-            print(f"Warning: could not load tool {rec.get('name')!r}: {exc}")
+            log.debug("Could not load tool %r", rec.get("name"), exc_info=True)
 
 
 async def _compact_session_history(ctx, run_id: str, trace_timing: bool = True) -> None:
@@ -232,6 +242,8 @@ async def _compact_session_history(ctx, run_id: str, trace_timing: bool = True) 
     from sqlalchemy import func, or_
     from uuid import UUID
     compact_started = time.perf_counter()
+    from app.services.detailed_trace import get_detailed_trace_logger
+    detailed_trace = get_detailed_trace_logger(run_id)
     trace = None
     if trace_timing:
         from app.services.agent_trace import get_trace_logger
@@ -271,18 +283,21 @@ async def _compact_session_history(ctx, run_id: str, trace_timing: bool = True) 
             f"[{m.created_at.isoformat()}] {m.role.upper()}: {m.content[:1500]}"
             for m in batch
         )
-        compact_call = lambda: retry_async(lambda: ctx.llm("reviewer").ainvoke([
+        compact_messages = [
             SystemMessage(content=(
                 "Update a concise memory summary of a user-assistant conversation. "
                 "Preserve durable user preferences, facts, ongoing tasks, and unresolved questions. "
                 "Drop transient details and do not invent facts. Return only the updated summary."
             )),
             HumanMessage(content=f"EXISTING SUMMARY:\n{previous_summary}\n\nNEW OLDER MESSAGES:\n{history}"),
-        ]))
+        ]
+        detailed_trace.llm_request("reviewer", compact_messages, purpose="history_compaction")
+        compact_call = lambda: retry_async(lambda: ctx.llm("reviewer").ainvoke(compact_messages))
         if trace:
             response = await trace.measure_async("llm_external", "reviewer.history_compaction", compact_call)
         else:
             response = await compact_call()
+        detailed_trace.llm_response("reviewer", response, purpose="history_compaction")
         summary = response.content if isinstance(response.content, str) else str(response.content)
         summary = summary.strip()[:6000]
         ctx.usage.add_message("reviewer", response)
@@ -313,6 +328,8 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
     import uuid
     import time
     start_time = time.time()
+    from app.services.detailed_trace import get_detailed_trace_logger
+    detailed_trace = get_detailed_trace_logger(run_id)
     error = None
     final_answer = ""
     final_stop_reason = None
@@ -323,6 +340,12 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         "input": getattr(ctx, "input", ""),
         "agent_id": getattr(ctx, "agent_id", None),
         "workflow_version_id": getattr(ctx.config, "workflow_version_id", None),
+    })
+    detailed_trace.record("agent_execution_started", {
+        "input": getattr(ctx, "input", ""),
+        "agent_id": getattr(ctx, "agent_id", None),
+        "workflow_version_id": getattr(ctx.config, "workflow_version_id", None),
+        "execution_style": getattr(ctx.config, "execution_style", None),
     })
     log.info(f"🚀 [RUN_GRAPH] Starting run_id={run_id}")
     log.info(f"📝 [RUN_GRAPH] Input: {ctx.input if hasattr(ctx, 'input') else 'N/A'}")
@@ -464,11 +487,21 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
                     await db.commit()
                     trace.log_timing("database", "run.final_commit", (time.perf_counter() - db_commit_started) * 1000)
         except Exception as db_exc:
-            print(f"Failed to update run record: {db_exc}")
+            log.debug("Failed to update run record: %s", db_exc)
 
         if not error and final_answer:
             await trace.measure_async("vector_index", "conversation.index", lambda: _index_run_conversation(ctx, run_id))
             total_tokens = ctx.usage.total
+
+        detailed_trace.record("agent_execution_completed", {
+            "status": "failed" if error else "success",
+            "answer": final_answer,
+            "error": error,
+            "stop_reason": final_stop_reason,
+            "tokens": total_tokens,
+            "duration_ms": total_duration,
+            "final_state": final_state,
+        })
 
         if not error:
             await _publish_run_event(run_id, "run_completed", {
@@ -490,6 +523,8 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
                 duration_ms=int((time.time() - trace.start_time) * 1000),
             )
             remove_trace_logger(run_id)
+            from app.services.detailed_trace import remove_detailed_trace_logger
+            remove_detailed_trace_logger(run_id)
         except Exception as trace_exc:
             log.warning(f"Failed to finalize trace: {trace_exc}")
 
@@ -508,10 +543,13 @@ async def execute_run(run_id: str, user_id: str, config_dict: dict,
             agent_id=agent_id, session_id=session_id, end_user_id=end_user_id,
         ))
     except Exception as exc:
+        from app.services.detailed_trace import get_detailed_trace_logger, remove_detailed_trace_logger
+        get_detailed_trace_logger(run_id).record("context_setup_failed", {"error": str(exc)})
         from app.services.agent_trace import remove_trace_logger
         trace.log_error(f"Context setup failed: {exc}")
         trace.finalize(status="failed", total_tokens=0, duration_ms=int((time.time() - trace.start_time) * 1000))
         remove_trace_logger(run_id)
+        remove_detailed_trace_logger(run_id)
         raise
     ctx.input = input_str       # type: ignore[attr-defined]
     ctx.variables = variables or {}  # type: ignore[attr-defined]

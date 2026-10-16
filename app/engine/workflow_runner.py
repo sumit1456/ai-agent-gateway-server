@@ -236,10 +236,15 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
                 text, _ = await run_tool_loop(ctx, system, user, tools, role=role)
             else:
                 llm_started = time.perf_counter()
+                from app.services.detailed_trace import get_detailed_trace_logger
+                detailed = get_detailed_trace_logger(run_id)
+                llm_messages = [SystemMessage(content=system), HumanMessage(content=user)]
+                detailed.llm_request(role, llm_messages, workflow_node=current, attempt=attempt)
                 response = await trace.measure_async(
                     "llm_external", f"workflow_step.{current}.{role}.ainvoke",
-                    lambda: ctx.llm(role).ainvoke([SystemMessage(content=system), HumanMessage(content=user)]),
+                    lambda: ctx.llm(role).ainvoke(llm_messages),
                 )
+                detailed.llm_response(role, response, workflow_node=current, attempt=attempt)
                 ctx.usage.add_message(role, response)
                 text = _content_to_text(response.content)
                 trace.log_llm_call(role, len(system) + len(user), len(text), int((time.perf_counter() - llm_started) * 1000))

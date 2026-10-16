@@ -26,6 +26,8 @@ async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, 
     """
     from app.services.agent_trace import get_trace_logger
     trace = get_trace_logger(ctx.run_id)
+    from app.services.detailed_trace import get_detailed_trace_logger
+    detailed = get_detailed_trace_logger(ctx.run_id)
     
     log.info(f"🎯 [LLM/{role.upper()}] Structured call for schema: {schema.__name__}")
     start_time = time.time()
@@ -38,10 +40,12 @@ async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, 
         runnable = ctx.llm(role).with_structured_output(schema, include_raw=True)
         for attempt in range(attempts):
             llm_call_start = time.time()
+            detailed.llm_request(role, messages, attempt=attempt + 1, structured_schema=schema.model_json_schema())
             out = await trace.measure_async(
                 "llm_external", f"{role}.structured_attempt_{attempt + 1}",
                 lambda: retry_async(lambda: runnable.ainvoke(messages)),
             )
+            detailed.llm_response(role, out.get("raw"), attempt=attempt + 1, parsed=out.get("parsed"))
             llm_call_duration = int((time.time() - llm_call_start) * 1000)
             
             ctx.usage.add_message(role, out.get("raw"))
@@ -70,15 +74,19 @@ async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, 
 async def _plain_json(ctx, role, schema, system, user, attempts, prior_messages=None):
     from app.services.agent_trace import get_trace_logger
     trace = get_trace_logger(ctx.run_id)
+    from app.services.detailed_trace import get_detailed_trace_logger
+    detailed = get_detailed_trace_logger(ctx.run_id)
     schema_txt = json.dumps(schema.model_json_schema())
     sys2 = f"{system}\n\nReply with ONLY a JSON object matching this JSON Schema, no other text:\n{schema_txt}"
     messages = [SystemMessage(content=sys2), *(prior_messages or []), HumanMessage(content=user)]
     last = ""
     for attempt in range(attempts):
+        detailed.llm_request(role, messages, attempt=attempt + 1, mode="plain_json", structured_schema=schema.model_json_schema())
         msg = await trace.measure_async(
             "llm_external", f"{role}.plain_json_attempt_{attempt + 1}",
             lambda: retry_async(lambda: ctx.llm(role).ainvoke(messages)),
         )
+        detailed.llm_response(role, msg, attempt=attempt + 1, mode="plain_json")
         ctx.usage.add_message(role, msg)
         try:
             return schema.model_validate(extract_json(msg.content))
@@ -98,6 +106,8 @@ async def llm_turn(ctx, role: str, messages: list, tools: list | None = None,
     """
     from app.services.agent_trace import get_trace_logger
     trace = get_trace_logger(ctx.run_id)
+    from app.services.detailed_trace import get_detailed_trace_logger
+    detailed = get_detailed_trace_logger(ctx.run_id)
     
     log.info(f"🎯 [LLM_TURN/{role.upper()}] Starting (tools: {len(tools) if tools else 0}, stream: {stream_answer})")
     start_time = time.time()
@@ -117,6 +127,7 @@ async def llm_turn(ctx, role: str, messages: list, tools: list | None = None,
         nonlocal emitted
         full = None
         chunk_count = 0
+        detailed.llm_request(role, messages, tools=tools or [], stream_answer=stream_answer)
         async for chunk in llm.astream(messages):
             chunk_count += 1
             full = chunk if full is None else full + chunk
@@ -131,6 +142,7 @@ async def llm_turn(ctx, role: str, messages: list, tools: list | None = None,
         
         if full is None:
             raise BadOutputError("empty model response")
+        detailed.llm_response(role, full)
         return full
 
     async def on_retry(n, exc):

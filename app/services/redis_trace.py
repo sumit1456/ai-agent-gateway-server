@@ -1,18 +1,13 @@
 """Dedicated, payload-safe diagnostics for Redis client operations."""
 
-import os
 import threading
 import time
 from datetime import datetime
 from app.services.log_paths import get_log_dir
+from app.config import settings
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-REDIS_TRACE_ENABLED = _env_bool("REDIS_TRACE_ENABLED", True)
+REDIS_TRACE_ENABLED = settings.redis_trace_enabled
 _write_lock = threading.Lock()
 
 

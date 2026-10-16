@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     embedding_model: str = "nvidia/nv-embedqa-e5-v5"
     embedding_dim: int = 1024
     log_level: str = "INFO"
+    gateway_logging_enabled: bool = False
+    detailed_trace_logging: bool = True
+    agent_trace_enabled: bool = False
+    startup_trace_enabled: bool = False
+    redis_trace_enabled: bool = False
     
     # Redis Configuration (for real-time run updates via SSE)
     redis_url: Optional[str] = None  # e.g., redis://localhost:6379 or upstash URL

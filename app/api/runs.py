@@ -234,6 +234,15 @@ async def create_run(
     
     # Generate a run ID
     run_id = str(uuid.uuid4())
+    from app.services.detailed_trace import get_detailed_trace_logger
+    detailed_trace = get_detailed_trace_logger(run_id)
+    detailed_trace.record("user_input", {
+        "input": input_text,
+        "variables": variables or {},
+        "agent_id": str(agent.id),
+        "session_id": str(session.id),
+        "end_user_id": effective_end_user_id,
+    })
 
     # Start the run in the background
     # Note: In a real implementation, we would properly handle the agent config
@@ -296,6 +305,7 @@ async def create_run(
             "llm_review": True
         }
     }
+    detailed_trace.record("effective_agent_configuration", config_dict)
     from app.services.agent_trace import get_trace_logger, log_startup_timing
     trace = get_trace_logger(run_id)
     log_startup_timing(trace, "request_agent_session_and_workflow_config", request_config_started)

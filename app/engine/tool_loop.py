@@ -19,6 +19,8 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
     """
     from app.services.agent_trace import get_trace_logger
     trace = get_trace_logger(ctx.run_id)
+    from app.services.detailed_trace import get_detailed_trace_logger
+    detailed = get_detailed_trace_logger(ctx.run_id)
     
     log.info(f"🔄 [TOOL_LOOP] Starting with max_turns={ctx.config.limits.max_tool_turns}")
     log.info(f"🔧 [TOOL_LOOP] Available tools: {tool_names}")
@@ -74,6 +76,7 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
         # Execute tools in parallel
         tool_exec_start = time.time()
         async def measured_tool_call(tool_call):
+            detailed.record("tool_request", {"tool": tool_call["name"], "arguments": tool_call["args"]})
             return await trace.measure_async(
                 "tools", tool_call["name"],
                 lambda: call_tool(ctx, tool_call["name"], tool_call["args"]),
@@ -87,6 +90,13 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
         
         # Log results
         for tc, res in zip(ai.tool_calls, results):
+            detailed.record("tool_result", {
+                "tool": tc["name"],
+                "arguments": tc["args"],
+                "ok": res.ok,
+                "output": res.output,
+                "error": res.error,
+            })
             status = "✅" if res.ok else "❌"
             result_preview = str(res.output)[:100] if res.ok else str(res.error)[:100]
             log.info(f"{status} [TOOL_LOOP] {tc['name']}: {result_preview}...")
