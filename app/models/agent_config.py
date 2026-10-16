@@ -2,9 +2,13 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 class RoleModels(BaseModel):
-    planner: str
-    executor: str
-    reviewer: str
+    planner: str | None = None
+    executor: str | None = None
+    reviewer: str | None = None
+    router: str | None = None
+    direct: str | None = None
+    controller: str | None = None
+    finalizer: str | None = None
 
 class Limits(BaseModel):
     max_input_chars: int = Field(default=30_000, ge=1, le=200_000)
@@ -22,26 +26,13 @@ class AgentConfig(BaseModel):
     name: str
     provider_id: str
     workflow_version_id: str
-    workflow_definition: dict | None = None
-    execution_style: Literal["graph_workflow", "single_orchestration"] = "graph_workflow"
+    # Injected from the active WorkflowVersion at run time; not stored in agent config.
+    workflow_definition: dict | None = Field(default=None, exclude=True)
+    # Derived from workflow node tool assignments when a run starts.
+    workflow_tool_names: list[str] = Field(default_factory=list, exclude=True)
     models: RoleModels
-    system_prompt: str                   # Jinja2 template (the agent's persona/rules)
-    
-    # Customizable System Prompts (optional - uses defaults if not provided)
-    router_prompt: str | None = None     # Custom router decision prompt
-    planner_prompt: str | None = None    # Custom planning prompt
-    executor_prompt: str | None = None   # Custom execution prompt
-    reviewer_prompt: str | None = None   # Custom review prompt
-    direct_prompt: str | None = None     # Custom direct mode prompt
-    finalizer_prompt: str | None = None  # Custom answer finalization prompt
-    controller_prompt: str | None = None  # Advanced controller prompt override
-
-    # Preset choices and additive guidance are stored inside agents.config JSON.
-    role_prompt_presets: dict[str, str] = Field(default_factory=dict)
-    role_instructions: dict[str, str] = Field(default_factory=dict)
-    
+    # Step behavior and transitions are configured in the selected workflow.
     variables: list[str] = []            # declared runtime variable names
-    tools: list[str] = []                # names of the user's registered tools
     use_platform_tools: bool = True      # future hook (section 10.6)
     knowledge_base_ids: list[str] = []
     temperature: float = 0.3

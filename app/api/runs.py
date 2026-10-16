@@ -258,6 +258,8 @@ async def create_run(
         if not workflow_version or not workflow_version.is_active:
             raise HTTPException(status_code=409, detail="Agent workflow version is missing or inactive")
         workflow_definition = workflow_version.definition
+    if not workflow_definition:
+        raise HTTPException(status_code=409, detail="Agent has no active workflow configured")
     agent_models = agent_cfg.get("models") or {}
     workflow_tool_names = {
         name
@@ -272,24 +274,17 @@ async def create_run(
         "provider_id": str(agent.provider_id),
         "workflow_version_id": str(agent.workflow_version_id) if agent.workflow_version_id else None,
         "workflow_definition": workflow_definition,
-        "execution_style": agent_cfg.get("execution_style", "graph_workflow"),
         "models": {
             "planner": agent_models.get("planner", "meta-llama/llama-3.1-70b-instruct"),
             "executor": agent_models.get("executor", "meta-llama/llama-3.1-70b-instruct"),
-            "reviewer": agent_models.get("reviewer", "meta-llama/llama-3.1-8b-instruct")
+            "reviewer": agent_models.get("reviewer", "meta-llama/llama-3.1-8b-instruct"),
+            "router": agent_models.get("router") or agent_models.get("executor", "meta-llama/llama-3.1-70b-instruct"),
+            "direct": agent_models.get("direct") or agent_models.get("executor", "meta-llama/llama-3.1-70b-instruct"),
+            "controller": agent_models.get("controller") or agent_models.get("executor", "meta-llama/llama-3.1-70b-instruct"),
+            "finalizer": agent_models.get("finalizer") or agent_models.get("executor", "meta-llama/llama-3.1-70b-instruct"),
         },
-        "system_prompt": agent_cfg.get("system_prompt", "You are a helpful assistant."),
-        "router_prompt": agent_cfg.get("router_prompt"),
-        "planner_prompt": agent_cfg.get("planner_prompt"),
-        "executor_prompt": agent_cfg.get("executor_prompt"),
-        "controller_prompt": agent_cfg.get("controller_prompt"),
-        "reviewer_prompt": agent_cfg.get("reviewer_prompt"),
-        "direct_prompt": agent_cfg.get("direct_prompt"),
-        "finalizer_prompt": agent_cfg.get("finalizer_prompt"),
-        "role_prompt_presets": agent_cfg.get("role_prompt_presets", {}),
-        "role_instructions": agent_cfg.get("role_instructions", {}),
         "variables": list(agent_cfg.get("variables", {}).keys()) if isinstance(agent_cfg.get("variables"), dict) else list(agent_cfg.get("variables", [])),
-        "tools": sorted(set(agent_cfg.get("tools", [])) | workflow_tool_names),
+        "workflow_tool_names": sorted(workflow_tool_names),
         "knowledge_base_ids": list(agent_cfg.get("knowledge_base_ids", [])),
         "temperature": agent_cfg.get("temperature", 0.3),
         "context_window_tokens": agent_cfg.get("context_window_tokens", 4096),

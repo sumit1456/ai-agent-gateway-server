@@ -41,12 +41,9 @@ def _agent_config_without_tool(config: dict, tool_name: str) -> tuple[dict, bool
     if isinstance(configured_tools, list) and tool_name in configured_tools:
         cleaned["tools"] = [name for name in configured_tools if name != tool_name]
         changed = True
-    workflow_definition = cleaned.get("workflow_definition")
-    if isinstance(workflow_definition, dict):
-        cleaned_definition, definition_changed = _without_tool(workflow_definition, tool_name)
-        if definition_changed:
-            cleaned["workflow_definition"] = cleaned_definition
-            changed = True
+    if "workflow_definition" in cleaned:
+        cleaned.pop("workflow_definition")
+        changed = True
     return cleaned, changed
 
 
@@ -57,12 +54,9 @@ def _agent_config_renamed_tool(config: dict, old_name: str, new_name: str) -> tu
     if isinstance(configured_tools, list) and old_name in configured_tools:
         cleaned["tools"] = [new_name if name == old_name else name for name in configured_tools]
         changed = True
-    workflow_definition = cleaned.get("workflow_definition")
-    if isinstance(workflow_definition, dict):
-        renamed_definition, definition_changed = _rename_tool(workflow_definition, old_name, new_name)
-        if definition_changed:
-            cleaned["workflow_definition"] = renamed_definition
-            changed = True
+    if "workflow_definition" in cleaned:
+        cleaned.pop("workflow_definition")
+        changed = True
     return cleaned, changed
 
 @router.post("/", response_model=dict)
@@ -274,8 +268,6 @@ async def update_tool(
             if successor:
                 agent.workflow_version_id = successor.id
                 updated_config["workflow_version_id"] = str(successor.id)
-                if "workflow_definition" in updated_config:
-                    updated_config["workflow_definition"] = successor.definition
                 changed = True
             if changed:
                 agent.config = updated_config
@@ -383,8 +375,6 @@ async def delete_tool(
         if successor:
             agent.workflow_version_id = successor.id
             updated_config["workflow_version_id"] = str(successor.id)
-            if "workflow_definition" in updated_config:
-                updated_config["workflow_definition"] = successor.definition
             config_changed = True
         if config_changed:
             agent.config = updated_config

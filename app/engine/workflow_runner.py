@@ -8,7 +8,6 @@ from uuid import UUID
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.engine.prompts import get_prompt
 from app.engine.workflow_templates import validate_definition
 
 
@@ -200,15 +199,12 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
                 for edge in definition["edges"]
                 if edge.get("from") == current and edge.get("when", {}).get("next")
             ]
-        base = get_prompt(ctx.config, role, max_steps=ctx.config.limits.max_steps)
-        system = f"{ctx.persona}\n\n{base}\n\nWORKFLOW STEP: {node.get('name', current)}\nThe workflow step instructions and output contract below take precedence over any conflicting role-template format.\n{node['instructions']}\nReturn a JSON object with these keys and value types: {json.dumps(node.get('output_schema') or {'response': 'string'})}."
-        if role == "planner":
-            system += (
-                "\n\nPrior conversation messages are not automatically included. If this request depends on earlier turns, "
-                "make the plan assign get_conversation_history to an executor task with only the needed last_n, role, "
-                "or date filters. Use that tool only if it appears in available_tools; do not retrieve history otherwise. "
-                "Name only tools listed in available_tools."
-            )
+        system = (
+            f"{ctx.persona}\n\nWORKFLOW STEP: {node.get('name', current)}\n"
+            f"Follow the workflow step instructions and output contract exactly.\n{node['instructions']}\n"
+            f"Return a JSON object with these keys and value types: "
+            f"{json.dumps(node.get('output_schema') or {'response': 'string'})}."
+        )
         user = "WORKFLOW STEP INPUT:\n" + json.dumps(step_input, ensure_ascii=False, default=str)
         from app.services.agent_trace import log_startup_timing
         log_startup_timing(trace, f"prompt_prepare.workflow_step.{current}", prompt_started)

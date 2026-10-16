@@ -130,8 +130,8 @@ async def update_workflow(workflow_id: str, payload: WorkflowUpdate, current_use
             agent.config = {
                 **(agent.config if isinstance(agent.config, dict) else {}),
                 "workflow_version_id": str(version.id),
-                "workflow_definition": version.definition,
             }
+            agent.config.pop("workflow_definition", None)
             agent.updated_at = datetime.now(timezone.utc)
             db.add(agent)
     await db.commit()
@@ -207,8 +207,8 @@ async def delete_workflow(workflow_id: str, current_user: User = Depends(current
                 agent.config = {
                     **(agent.config if isinstance(agent.config, dict) else {}),
                     "workflow_version_id": str(default_version.id),
-                    "workflow_definition": default_version.definition,
                 }
+                agent.config.pop("workflow_definition", None)
                 agent.updated_at = datetime.now(timezone.utc)
                 db.add(agent)
 

@@ -39,7 +39,6 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
                         end_user_id: str | None = None) -> RunContext:
     """Build a RunContext for a new run."""
     from uuid import UUID
-    from jinja2.sandbox import SandboxedEnvironment
     from app.models.agent_config import AgentConfig
     from app.tools.registry import ToolRegistry
     from app.knowledge.retriever import KnowledgeRetriever
@@ -56,14 +55,13 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     detailed_trace = get_detailed_trace_logger(run_id)
     config_started = time.perf_counter()
     config = AgentConfig(**config_dict)
-    vars_dict = variables or {}
-    try:
-        persona = SandboxedEnvironment().from_string(config.system_prompt).render(**vars_dict)
-    except Exception:
-        persona = config.system_prompt
+    persona = ""
     from app.services.agent_trace import log_startup_timing
     log_startup_timing(trace, "agent_config_and_persona", config_started)
-    detailed_trace.record("rendered_system_persona", {"persona": persona, "variables": vars_dict})
+    detailed_trace.record("workflow_prompt_source", {
+        "workflow_version_id": getattr(config, "workflow_version_id", None),
+        "source": "workflow node instructions",
+    })
 
     provider_obj = None
     decrypted_api_key = ""
@@ -102,7 +100,7 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
             agent_id=agent_id,
             provider_ref=str(config.provider_id),
             knowledge_base_ids=config.knowledge_base_ids,
-            tool_names=config.tools,
+            tool_names=config.workflow_tool_names,
         )
         log_startup_timing(trace, "provider_kb_and_tool_config_load", execution_config_started)
 
@@ -181,7 +179,7 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
         "conversation_summary": conversation_summary,
         "session_task_state": session_task_state,
         "knowledge_namespaces": kb_namespaces,
-        "tool_names": config.tools,
+        "tool_names": config.workflow_tool_names,
         "models": config.models.model_dump(mode="json"),
     })
 
@@ -345,7 +343,6 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         "input": getattr(ctx, "input", ""),
         "agent_id": getattr(ctx, "agent_id", None),
         "workflow_version_id": getattr(ctx.config, "workflow_version_id", None),
-        "execution_style": getattr(ctx.config, "execution_style", None),
     })
     log.info(f"🚀 [RUN_GRAPH] Starting run_id={run_id}")
     log.info(f"📝 [RUN_GRAPH] Input: {ctx.input if hasattr(ctx, 'input') else 'N/A'}")
@@ -381,23 +378,12 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         graph_start = time.time()
         
         final_state = dict(initial_state)
-        execution_style = getattr(ctx.config, "execution_style", "graph_workflow")
         workflow_definition = getattr(ctx.config, "workflow_definition", None)
-        if execution_style == "single_orchestration":
-            from app.engine.single_orchestration import run_single_orchestration
-            final_state.update(await run_single_orchestration(initial_state, config))
-            await _persist_run_checkpoint(run_id, ctx, final_state)
-        elif workflow_definition:
-            from app.engine.workflow_runner import run_workflow
-            final_state.update(await run_workflow(ctx, run_id, workflow_definition))
-            await _persist_run_checkpoint(run_id, ctx, final_state)
-        else:
-            graph = get_graph()
-            async for update in graph.astream(initial_state, config, stream_mode="updates"):
-                for node_update in update.values():
-                    if isinstance(node_update, dict):
-                        final_state.update(node_update)
-                        await _persist_run_checkpoint(run_id, ctx, final_state)
+        if not workflow_definition:
+            raise RuntimeError("Agent has no active workflow configured")
+        from app.engine.workflow_runner import run_workflow
+        final_state.update(await run_workflow(ctx, run_id, workflow_definition))
+        await _persist_run_checkpoint(run_id, ctx, final_state)
         
         graph_duration = int((time.time() - graph_start) * 1000)
         log.info(f"✅ [RUN_GRAPH] Graph completed in {graph_duration}ms")
