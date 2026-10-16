@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
+from app.services.log_paths import get_log_dir
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -38,8 +39,7 @@ class TraceLogger:
             return
 
         # Create logs directory if it doesn't exist
-        log_dir = Path("agent_traces")
-        log_dir.mkdir(exist_ok=True)
+        log_dir = get_log_dir()
         
         # Create trace file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -366,8 +366,7 @@ def log_startup_timing(trace: TraceLogger, name: str, started: float) -> None:
         phase = phase_names.get(name, name.replace("provider_model_client.", "model_client_").replace("prompt_prepare.workflow_step.", "prompt_prepare_step_"))
         phase = re.sub(r"[^A-Za-z0-9_-]+", "_", phase).strip("_") or "phase"
         global _startup_log_sequence
-        log_dir = Path("agent_traces") / "startup"
-        log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = get_log_dir()
         with _startup_log_lock:
             while True:
                 _startup_log_sequence += 1

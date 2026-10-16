@@ -4,7 +4,7 @@ import os
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
+from app.services.log_paths import get_log_dir
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -22,8 +22,7 @@ def log_redis_operation(operation: str, duration_ms: float, status: str = "ok", 
         return
 
     try:
-        log_dir = Path("redis_traces")
-        log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = get_log_dir()
         path = log_dir / f"redis_trace_{datetime.now():%Y%m%d}.log"
         timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
         suffix = f" | {detail}" if detail else ""

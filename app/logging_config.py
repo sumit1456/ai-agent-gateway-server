@@ -4,6 +4,7 @@ Logging configuration with Windows Unicode support.
 import logging
 import sys
 import io
+from app.services.log_paths import get_log_dir
 
 
 def setup_logging():
@@ -15,7 +16,7 @@ def setup_logging():
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
     # File handler with UTF-8 encoding
-    file_handler = logging.FileHandler('gateway.log', encoding='utf-8')
+    file_handler = logging.FileHandler(get_log_dir() / 'gateway.log', encoding='utf-8')
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
     

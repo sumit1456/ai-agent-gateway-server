@@ -11,7 +11,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /app/agent_traces \
+    && mkdir -p /app/logs \
     && chown -R appuser:appuser /app
 
 USER appuser
