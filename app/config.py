@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     embedding_dim: int = 1024
     log_level: str = "INFO"
     gateway_logging_enabled: bool = False
-    detailed_trace_logging: bool = True
+    detailed_trace_logging: bool = False
     agent_trace_enabled: bool = False
     startup_trace_enabled: bool = False
     redis_trace_enabled: bool = False

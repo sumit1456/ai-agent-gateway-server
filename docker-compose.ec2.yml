@@ -2,6 +2,8 @@ services:
   backend:
     image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME in .env}/ai-agent-gateway-server:${BACKEND_IMAGE_TAG:-latest}
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       PORT: 8000
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
@@ -14,12 +16,6 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nvidia/nv-embedqa-e5-v5}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
       RERANK_MODEL: ${RERANK_MODEL:-bge-reranker-v2-m3}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      GATEWAY_LOGGING_ENABLED: ${GATEWAY_LOGGING_ENABLED:-false}
-      DETAILED_TRACE_LOGGING: ${DETAILED_TRACE_LOGGING:-true}
-      AGENT_TRACE_ENABLED: ${AGENT_TRACE_ENABLED:-false}
-      STARTUP_TRACE_ENABLED: ${STARTUP_TRACE_ENABLED:-false}
-      REDIS_TRACE_ENABLED: ${REDIS_TRACE_ENABLED:-false}
     expose:
       - "8000"
     healthcheck:

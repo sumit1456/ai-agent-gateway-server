@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Body, Depends, HTTPException, status
+from pydantic import BaseModel, Field, ValidationError
 from sqlmodel import select
 from app.security import current_user
 from app.db import get_db
@@ -9,6 +10,63 @@ from datetime import datetime, timezone
 import uuid
 
 router = APIRouter()
+
+
+class ToolTestRequest(BaseModel):
+    endpoint_url: str
+    input_schema: dict = Field(default_factory=dict)
+    arguments: dict = Field(default_factory=dict)
+    timeout_ms: int = 10000
+    auth_token: Optional[str] = None
+    tool_id: Optional[str] = None
+
+
+@router.post("/test", response_model=dict)
+async def test_tool(
+    payload: ToolTestRequest,
+    current_user: User = Depends(current_user),
+    db: Depends(get_db) = Depends(get_db),
+):
+    """Validate sample arguments against the runtime schema and call the webhook."""
+    if not 1 <= payload.timeout_ms <= 120000:
+        raise HTTPException(status_code=400, detail="Timeout must be between 1 and 120000 milliseconds")
+    if not payload.endpoint_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Endpoint URL must use HTTP or HTTPS")
+
+    saved_tool = None
+    if payload.tool_id:
+        try:
+            tool_uuid = uuid.UUID(payload.tool_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid tool ID format") from exc
+        result = await db.exec(select(Tool).where(Tool.id == tool_uuid, Tool.user_id == current_user.id))
+        saved_tool = result.first()
+        if not saved_tool:
+            raise HTTPException(status_code=404, detail="Tool not found")
+
+    from app.tools.webhook import WebhookTool
+
+    try:
+        tool = WebhookTool(
+            name="tool_test",
+            description="Temporary webhook test",
+            endpoint_url=payload.endpoint_url,
+            auth_enc=payload.auth_token or (saved_tool.auth_enc if saved_tool else None),
+            timeout_ms=payload.timeout_ms,
+            input_schema=payload.input_schema,
+        )
+        validated = tool.input_schema.model_validate(payload.arguments)
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=422, detail=f"Arguments do not match the tool schema: {exc}") from exc
+
+    arguments = validated.model_dump(exclude_unset=True)
+    result = await tool.execute(**arguments)
+    return {
+        "ok": result.ok,
+        "arguments_sent": arguments,
+        "output": result.output,
+        "error": result.error,
+    }
 
 
 def _without_tool(definition: dict, tool_name: str) -> tuple[dict, bool]:
@@ -83,6 +141,13 @@ async def register_tool(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Webhook tools require an endpoint_url"
         )
+
+    if kind == "webhook":
+        from app.tools.webhook import WebhookTool
+        try:
+            WebhookTool._build_input_schema(input_schema)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid tool input schema: {exc}") from exc
     
     # Check if tool already exists for this user
     result = await db.exec(
@@ -194,7 +259,7 @@ async def update_tool(
     description: Optional[str] = None,
     endpoint_url: Optional[str] = None,
     auth_token: Optional[str] = None,
-    input_schema: Optional[dict] = None,
+    payload: Optional[dict] = Body(default=None),
     timeout_ms: Optional[int] = None,
     current_user: User = Depends(current_user),
     db: Depends(get_db) = Depends(get_db)
@@ -221,6 +286,23 @@ async def update_tool(
             detail="Tool not found"
         )
     
+    input_schema = None
+    body_auth_token = None
+    if payload is not None:
+        if isinstance(payload, dict) and isinstance(payload.get("input_schema"), dict):
+            input_schema = payload.get("input_schema")
+            body_auth_token = payload.get("auth_token")
+        elif isinstance(payload, dict):
+            # Keep accepting the original raw JSON Schema request body.
+            input_schema = payload
+
+    if input_schema is not None:
+        from app.tools.webhook import WebhookTool
+        try:
+            WebhookTool._build_input_schema(input_schema)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid tool input schema: {exc}") from exc
+
     old_name = tool.name
     if name is not None:
         name = name.strip()
@@ -282,8 +364,10 @@ async def update_tool(
         tool.description = description
     if endpoint_url is not None:
         tool.endpoint_url = endpoint_url
-    if auth_token is not None:
-        tool.auth_enc = auth_token  # TODO: Implement proper encryption
+    if body_auth_token is not None:
+        tool.auth_enc = body_auth_token  # TODO: Implement proper encryption
+    elif auth_token is not None:
+        tool.auth_enc = auth_token  # Backward compatibility for query-based clients.
     if input_schema is not None:
         tool.input_schema = input_schema
     if timeout_ms is not None:
@@ -401,17 +485,25 @@ async def register_tool_alias(
     description: str,
     kind: str,
     endpoint_url: Optional[str] = None,
-    input_schema: dict = Body(default={}),
+    payload: dict = Body(default={}),
     timeout_ms: int = 10000,
     current_user: User = Depends(current_user),
     db: Depends(get_db) = Depends(get_db)
 ):
     """Alias for register_tool to match the architecture documentation."""
+    # Accept the original raw schema body as well as the newer wrapped form.
+    if isinstance(payload, dict) and isinstance(payload.get("input_schema"), dict):
+        input_schema = payload.get("input_schema") or {}
+        auth_token = payload.get("auth_token")
+    else:
+        input_schema = payload if isinstance(payload, dict) else {}
+        auth_token = None
     return await register_tool(
         name=name,
         description=description,
         kind=kind,
         endpoint_url=endpoint_url,
+        auth_token=auth_token,
         input_schema=input_schema,
         timeout_ms=timeout_ms,
         current_user=current_user,

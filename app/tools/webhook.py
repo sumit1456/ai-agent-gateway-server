@@ -1,14 +1,13 @@
 from __future__ import annotations
 import httpx
 from typing import Any
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model
 from app.tools.base import BaseTool, ToolResult
 from app.engine.context import RunContext
 
 class WebhookToolInput(BaseModel):
-    """Flexible input schema for webhook tools - accepts any kwargs."""
-    class Config:
-        extra = "allow"  # Allow any additional fields
+    """Default webhook arguments are empty unless declared in the input schema."""
+    model_config = ConfigDict(extra="forbid")
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -26,8 +25,18 @@ class WebhookTool(BaseTool):
 
     @staticmethod
     def _build_input_schema(schema: dict) -> type[BaseModel]:
-        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
-        required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
+        if not isinstance(schema, dict):
+            raise ValueError("Tool input schema must be a JSON object")
+        properties = schema.get("properties", {}) or {}
+        required_fields = schema.get("required", []) or []
+        if not isinstance(properties, dict):
+            raise ValueError("Tool input schema 'properties' must be an object")
+        if not isinstance(required_fields, list) or any(not isinstance(name, str) for name in required_fields):
+            raise ValueError("Tool input schema 'required' must be an array of argument names")
+        unknown_required = set(required_fields) - set(properties)
+        if unknown_required:
+            raise ValueError("Required arguments are missing from properties: " + ", ".join(sorted(unknown_required)))
+        required = set(required_fields)
         type_map = {"string": str, "integer": int, "number": float, "boolean": bool, "object": dict, "array": list}
         fields = {}
         for name, definition in properties.items():
@@ -35,7 +44,13 @@ class WebhookTool(BaseTool):
             field_type = type_map.get(definition.get("type"), Any)
             default = ... if name in required else None
             fields[name] = (field_type, Field(default, description=definition.get("description", "")))
-        return create_model("WebhookToolInput", **fields) if fields else WebhookToolInput
+        if not fields:
+            return WebhookToolInput
+        return create_model(
+            "WebhookToolInput",
+            __config__=ConfigDict(extra="forbid"),
+            **fields,
+        )
 
     @property
     def name(self) -> str:
@@ -50,6 +65,8 @@ class WebhookTool(BaseTool):
         return self._input_schema
 
     async def _execute(self, **kwargs) -> ToolResult:
+        validated = self.input_schema.model_validate(kwargs)
+        kwargs = validated.model_dump(exclude_unset=True)
         headers = {}
         if self.auth_enc:
             # In a real implementation, we would decrypt this
