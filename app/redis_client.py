@@ -94,13 +94,16 @@ async def publish_event(channel: str, event_type: str, data: dict) -> bool:
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
-        await measure_redis(
-            "stream.xadd",
-            lambda: client.xadd(channel, {"event": message}, maxlen=1000, approximate=True),
-            f"event={event_type}",
-        )
-        # Keep enough history for reconnecting clients without retaining runs forever.
-        await measure_redis("stream.expire", lambda: client.expire(channel, 86400), f"event={event_type}")
+        # Pipeline the ordered commands into one Redis round trip. EXPIRE follows
+        # XADD on the connection, so the stream exists before its retention is set.
+        async with client.pipeline(transaction=False) as pipe:
+            pipe.xadd(channel, {"event": message}, maxlen=1000, approximate=True)
+            pipe.expire(channel, 86400)
+            await measure_redis(
+                "stream.pipeline",
+                pipe.execute,
+                f"commands=xadd,expire;event={event_type}",
+            )
         log_redis_operation("stream.publish", (time.perf_counter() - publish_started) * 1000, "ok", f"event={event_type}")
         return True
     except Exception as e:
