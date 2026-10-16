@@ -14,7 +14,7 @@ async def _publish_run_event(run_id: str, event_type: str, data: dict) -> None:
     """Publish progress without allowing Redis failures to affect a run."""
     try:
         from app.redis_client import publish_event
-        from app.engine.trace_logger import _active_traces
+        from app.services.agent_trace import _active_traces
         trace = _active_traces.get(run_id)
         if trace:
             await trace.measure_async("redis", f"publish:{event_type}", lambda: publish_event(f"run:{run_id}", event_type, data))
@@ -49,14 +49,18 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     from app.security import decrypt
     from app.services.run_context_config import load_agent_execution_config
     import time
-    from app.engine.trace_logger import get_trace_logger
+    from app.services.agent_trace import get_trace_logger
 
+    trace = get_trace_logger(run_id)
+    config_started = time.perf_counter()
     config = AgentConfig(**config_dict)
     vars_dict = variables or {}
     try:
         persona = SandboxedEnvironment().from_string(config.system_prompt).render(**vars_dict)
     except Exception:
         persona = config.system_prompt
+    from app.services.agent_trace import log_startup_timing
+    log_startup_timing(trace, "agent_config_and_persona", config_started)
 
     provider_obj = None
     decrypted_api_key = ""
@@ -73,11 +77,10 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     except (ValueError, TypeError):
         uid = user_id
 
-    trace = get_trace_logger(run_id)
-    context_db_started = time.perf_counter()
     async with SessionLocal() as db:
         # Load only compact session state here. Conversation turns are retrieved
         # on demand through get_conversation_history.
+        session_load_started = time.perf_counter()
         if session_id:
             try:
                 session_uuid = UUID(str(session_id))
@@ -87,7 +90,9 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
                     session_task_state = session.task_state or {}
             except (ValueError, TypeError):
                 log.warning("Could not load conversation context for run %s", run_id)
+        log_startup_timing(trace, "session_summary_load", session_load_started)
 
+        execution_config_started = time.perf_counter()
         execution_config = await load_agent_execution_config(
             db,
             user_id=uid,
@@ -96,8 +101,10 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
             knowledge_base_ids=config.knowledge_base_ids,
             tool_names=config.tools,
         )
+        log_startup_timing(trace, "provider_kb_and_tool_config_load", execution_config_started)
 
         # Static provider/KB/tool config is read in one query on cache miss.
+        provider_setup_started = time.perf_counter()
         provider_record = execution_config.get("provider")
         if provider_record:
             try:
@@ -122,8 +129,7 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
             )
 
         user_tools = execution_config.get("tools", [])
-
-    trace.log_timing("database", "context.load", (time.perf_counter() - context_db_started) * 1000)
+        log_startup_timing(trace, "provider_and_retriever_setup", provider_setup_started)
 
     temps = {"planner": 0.2, "reviewer": 0.0}
     def factory(role: str):
@@ -137,11 +143,14 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
             raise ValueError(error_msg)
         model_name = getattr(config.models, role, None) or config.models.executor
         print(f"✓ Creating {role} LLM: {model_name} using {provider_obj.provider_id}")
-        return provider_obj.get_chat_model(
+        model_started = time.perf_counter()
+        model = provider_obj.get_chat_model(
             model=model_name,
             api_key=decrypted_api_key,
             temperature=temps.get(role, config.temperature)
         )
+        log_startup_timing(trace, f"provider_model_client.{role}", model_started)
+        return model
 
     registry = ToolRegistry()
     conversation_namespace = (
@@ -166,6 +175,7 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
         conversation_namespace=conversation_namespace,
     )
 
+    tool_setup_started = time.perf_counter()
     # 4. Register builtin gateway tools (ctx-aware)
     from app.tools.builtin import build_builtin_tools
     for tool in build_builtin_tools(ctx):
@@ -174,6 +184,8 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     # 5. Register user-defined tools
     if user_tools:
         _register_user_tools(registry, user_tools)
+
+    log_startup_timing(trace, "tool_registry_setup", tool_setup_started)
 
     RUNS[run_id] = ctx
     return ctx
@@ -222,7 +234,7 @@ async def _compact_session_history(ctx, run_id: str, trace_timing: bool = True) 
     compact_started = time.perf_counter()
     trace = None
     if trace_timing:
-        from app.engine.trace_logger import get_trace_logger
+        from app.services.agent_trace import get_trace_logger
         trace = get_trace_logger(run_id)
 
     try:
@@ -387,7 +399,7 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         })
     finally:
         # Persist artifacts to Postgres before closing
-        from app.engine.trace_logger import get_trace_logger, remove_trace_logger
+        from app.services.agent_trace import get_trace_logger, remove_trace_logger
         trace = get_trace_logger(run_id)
         await trace.measure_async("database", "artifacts.persist", lambda: ctx.artifacts.persist(run_id))
         
@@ -488,7 +500,7 @@ async def execute_run(run_id: str, user_id: str, config_dict: dict,
                       session_id: str | None = None,
                       end_user_id: str | None = None) -> None:
     """Entry point for starting a run."""
-    from app.engine.trace_logger import get_trace_logger
+    from app.services.agent_trace import get_trace_logger
     trace = get_trace_logger(run_id)
     try:
         ctx = await trace.measure_async("setup", "build_context", lambda: build_context(
@@ -496,7 +508,7 @@ async def execute_run(run_id: str, user_id: str, config_dict: dict,
             agent_id=agent_id, session_id=session_id, end_user_id=end_user_id,
         ))
     except Exception as exc:
-        from app.engine.trace_logger import remove_trace_logger
+        from app.services.agent_trace import remove_trace_logger
         trace.log_error(f"Context setup failed: {exc}")
         trace.finalize(status="failed", total_tokens=0, duration_ms=int((time.time() - trace.start_time) * 1000))
         remove_trace_logger(run_id)
@@ -547,7 +559,7 @@ async def _persist_run_checkpoint(run_id: str, ctx: RunContext, state: dict) -> 
     except Exception as exc:
         log.warning("Could not persist checkpoint for run %s: %s", run_id, exc)
     finally:
-        from app.engine.trace_logger import get_trace_logger
+        from app.services.agent_trace import get_trace_logger
         get_trace_logger(run_id).log_timing("database", "run.checkpoint", (time.perf_counter() - started) * 1000)
 
 

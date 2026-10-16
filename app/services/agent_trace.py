@@ -4,10 +4,25 @@ Trace Logger - Detailed execution trace for debugging agent pipeline
 Writes a human-readable trace file showing exactly what the agent is doing.
 """
 import json
+import os
+import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Flip these switches to control trace detail and startup profiling independently.
+AGENT_TRACE_ENABLED = _env_bool("AGENT_TRACE_ENABLED", True)
+STARTUP_TRACE_ENABLED = _env_bool("STARTUP_TRACE_ENABLED", True)
+_startup_log_lock = threading.Lock()
+_startup_log_sequence = 0
 
 class TraceLogger:
     """Logs detailed trace of agent execution to a file."""
@@ -17,6 +32,11 @@ class TraceLogger:
         self.start_time = time.time()
         self.timings: Dict[str, Dict[str, Any]] = {}
         
+        self.enabled = AGENT_TRACE_ENABLED
+        if not self.enabled:
+            self.trace_file = None
+            return
+
         # Create logs directory if it doesn't exist
         log_dir = Path("agent_traces")
         log_dir.mkdir(exist_ok=True)
@@ -40,6 +60,8 @@ class TraceLogger:
     
     def _write(self, message: str):
         """Write message to trace file."""
+        if not self.enabled:
+            return
         try:
             with open(self.trace_file, 'a', encoding='utf-8') as f:
                 timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -293,6 +315,8 @@ class TraceLogger:
 
     def finalize(self, status: str, total_tokens: int, duration_ms: int):
         """Write final summary."""
+        if not self.enabled:
+            return
         self._write("\n" + "=" * 80)
         self._write(f"EXECUTION COMPLETE")
         self._write("=" * 80)
@@ -323,3 +347,35 @@ def remove_trace_logger(run_id: str):
     """Remove trace logger after run completes."""
     if run_id in _active_traces:
         del _active_traces[run_id]
+
+
+def log_startup_timing(trace: TraceLogger, name: str, started: float) -> None:
+    """Write one startup phase to its own sequential log file."""
+    if STARTUP_TRACE_ENABLED:
+        duration_ms = (time.perf_counter() - started) * 1000
+        phase_names = {
+            "request_agent_session_and_workflow_config": "config_load",
+            "agent_config_and_persona": "agent_config_load",
+            "session_summary_load": "conversation_context_load",
+            "provider_kb_and_tool_config_load": "provider_kb_tool_config_load",
+            "provider_and_retriever_setup": "provider_retriever_setup",
+            "tool_registry_setup": "tool_registry_setup",
+            "prompt_prepare.router": "prompt_prepare_router",
+            "prompt_prepare.direct": "prompt_prepare_direct",
+        }
+        phase = phase_names.get(name, name.replace("provider_model_client.", "model_client_").replace("prompt_prepare.workflow_step.", "prompt_prepare_step_"))
+        phase = re.sub(r"[^A-Za-z0-9_-]+", "_", phase).strip("_") or "phase"
+        global _startup_log_sequence
+        log_dir = Path("agent_traces") / "startup"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with _startup_log_lock:
+            while True:
+                _startup_log_sequence += 1
+                path = log_dir / f"startup_trace_{phase}{_startup_log_sequence}.log"
+                if not path.exists():
+                    break
+            with open(path, "w", encoding="utf-8") as output:
+                output.write(f"Startup phase: {name}\n")
+                output.write(f"Run ID: {trace.run_id}\n")
+                output.write(f"Recorded: {datetime.now().isoformat()}\n")
+                output.write(f"Duration: {duration_ms:.1f}ms\n")

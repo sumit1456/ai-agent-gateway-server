@@ -7,6 +7,7 @@ class RoleModels(BaseModel):
     reviewer: str
 
 class Limits(BaseModel):
+    max_input_chars: int = Field(default=30_000, ge=1, le=200_000)
     max_iterations: int = 5              # reviewer passes before giving up
     max_tokens_per_run: int = 50_000
     timeout_s: int = 120

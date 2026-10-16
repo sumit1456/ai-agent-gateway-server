@@ -150,7 +150,7 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
         raise ValueError("Invalid workflow: " + "; ".join(errors))
     from app.db import SessionLocal
     from app.engine.runner import _publish_run_event
-    from app.engine.trace_logger import get_trace_logger
+    from app.services.agent_trace import get_trace_logger
     from app.models.tables import WorkflowRunStep
     from app.engine.tool_loop import run_tool_loop
 
@@ -178,6 +178,7 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
         attempt = attempt_counts[current]
         if attempt > int(node.get("max_attempts", 1)):
             raise RuntimeError(f"Workflow step {current} exceeded its {node.get('max_attempts', 1)}-attempt limit")
+        prompt_started = time.perf_counter()
         step_input = _resolve_input(node, request, variables, outputs)
         role = node["role"]
         if role == "planner":
@@ -209,6 +210,8 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
                 "Name only tools listed in available_tools."
             )
         user = "WORKFLOW STEP INPUT:\n" + json.dumps(step_input, ensure_ascii=False, default=str)
+        from app.services.agent_trace import log_startup_timing
+        log_startup_timing(trace, f"prompt_prepare.workflow_step.{current}", prompt_started)
         started = datetime.now(timezone.utc)
         row = WorkflowRunStep(run_id=UUID(run_id), node_id=current, attempt=attempt, status="running", input=step_input, started_at=started)
         trace.log_node_enter(current.upper(), {"node_id": current, "input_keys": list(step_input)})

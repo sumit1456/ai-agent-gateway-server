@@ -3,7 +3,7 @@
 Quick test of the trace logger functionality
 """
 import time
-from app.engine.trace_logger import TraceLogger, get_trace_logger, remove_trace_logger
+from app.services.agent_trace import TraceLogger, get_trace_logger, remove_trace_logger
 
 def test_basic_trace():
     """Test basic trace logging functionality"""

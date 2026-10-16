@@ -12,6 +12,7 @@ import uuid
 import asyncio
 import json
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -164,12 +165,6 @@ async def create_run(
             detail="Input cannot be empty"
         )
     
-    if len(input_text) > 10000:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Input too long (max 10,000 characters)"
-        )
-    
     # Validate variables if provided
     if variables:
         if not isinstance(variables, dict):
@@ -191,6 +186,7 @@ async def create_run(
             detail="Invalid agent ID format"
         )
     
+    request_config_started = time.perf_counter()
     # Verify the agent exists and belongs to the user
     result = await db.exec(
         select(Agent).where(
@@ -203,6 +199,14 @@ async def create_run(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
+        )
+
+    from app.models.agent_config import Limits
+    agent_limits = Limits.model_validate((agent.config or {}).get("limits") or {})
+    if len(input_text) > agent_limits.max_input_chars:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Input too long (max {agent_limits.max_input_chars:,} characters for this agent)"
         )
     
     # Get or create a session scoped to this owned agent, end-user, and caller session.
@@ -288,9 +292,13 @@ async def create_run(
             "max_parallel_steps": 3,
             "max_tool_turns": 4,
             "max_tool_output_chars": 4000,
+            "max_input_chars": 30_000,
             "llm_review": True
         }
     }
+    from app.services.agent_trace import get_trace_logger, log_startup_timing
+    trace = get_trace_logger(run_id)
+    log_startup_timing(trace, "request_agent_session_and_workflow_config", request_config_started)
     
     # Persist the run and incoming message before starting background work.
     run_record = Run(

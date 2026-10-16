@@ -17,7 +17,7 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
     Returns (final_text, number_of_failed_tool_calls). Raises StopRun on cancel/timeout/budget.
     The final allowed turn is made WITHOUT tools so the model must answer.
     """
-    from app.engine.trace_logger import get_trace_logger
+    from app.services.agent_trace import get_trace_logger
     trace = get_trace_logger(ctx.run_id)
     
     log.info(f"🔄 [TOOL_LOOP] Starting with max_turns={ctx.config.limits.max_tool_turns}")

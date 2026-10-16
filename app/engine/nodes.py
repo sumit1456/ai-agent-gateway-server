@@ -11,7 +11,7 @@ from app.engine.types import (InitialDecision, Plan, ReviewResult, RouteDecision
                               RunState, StepResult, StepVerdict, StopRun)
 from app.engine.views import (build_view, clip, assemble, conversation_messages,
                               context_char_budget, task_ledger)
-from app.engine.trace_logger import get_trace_logger
+from app.services.agent_trace import get_trace_logger
 
 log = logging.getLogger(__name__)
 MAX_STEP_RETRIES = 2          # retries per step (attempt 0 + 2 retries)
@@ -112,6 +112,7 @@ async def router_node(state: RunState, config: RunnableConfig) -> dict:
     await ctx.sink.emit("run.started", {"run_id": ctx.run_id})
     await _publish_run_event(ctx.run_id, "node_enter", {"node": "router", "status": "Selecting and running role"})
 
+    prompt_started = time.perf_counter()
     visible = [name for name in ctx.tools.names() if name != "read_artifact"]
     forced = ctx.config.limits.force_mode
     system = "\n\n".join([
@@ -128,6 +129,8 @@ async def router_node(state: RunState, config: RunnableConfig) -> dict:
         ("KNOWLEDGE BASE", "available" if ctx.kb_namespaces else "not available"),
         ("REQUIRED MODE", forced or "Choose direct or plan."),
     ], context_char_budget(ctx, 9000))
+    from app.services.agent_trace import log_startup_timing
+    log_startup_timing(trace, "prompt_prepare.router", prompt_started)
     from langchain_core.messages import SystemMessage, HumanMessage
     messages = [SystemMessage(content=system), *conversation_messages(ctx, recent_limit=4), HumanMessage(content=user)]
     decision: InitialDecision = await llm.structured_call(ctx, "router", InitialDecision, system, user,
@@ -186,12 +189,15 @@ async def direct_node(state: RunState, config: RunnableConfig) -> dict:
     log.info(f"📝 [DIRECT] Goal: {state['goal'][:100]}...")
     trace.log_custom(f"Goal: {state['goal']}")
     
+    prompt_started = time.perf_counter()
     direct_prompt = get_prompt(ctx.config, "direct")
     system = f"{ctx.persona}\n\n{direct_prompt}"
     user = assemble([
         ("CURRENT USER MESSAGE", state["goal"]),
         ("SHARED TASK LIST", task_ledger(state)),
     ], context_char_budget(ctx, 13000))
+    from app.services.agent_trace import log_startup_timing
+    log_startup_timing(trace, "prompt_prepare.direct", prompt_started)
     # Combine tool names with semantic_search if a knowledge base is available
     available_tools = list(ctx.tools.names())
     if ctx.kb_namespaces:

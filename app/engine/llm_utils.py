@@ -24,7 +24,7 @@ async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, 
     2) fallback: plain JSON prompt + extract_json + validate
     Transient HTTP errors are retried inside via retry_async.
     """
-    from app.engine.trace_logger import get_trace_logger
+    from app.services.agent_trace import get_trace_logger
     trace = get_trace_logger(ctx.run_id)
     
     log.info(f"🎯 [LLM/{role.upper()}] Structured call for schema: {schema.__name__}")
@@ -68,7 +68,7 @@ async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, 
     return await _plain_json(ctx, role, schema, system, user, attempts, prior_messages)
 
 async def _plain_json(ctx, role, schema, system, user, attempts, prior_messages=None):
-    from app.engine.trace_logger import get_trace_logger
+    from app.services.agent_trace import get_trace_logger
     trace = get_trace_logger(ctx.run_id)
     schema_txt = json.dumps(schema.model_json_schema())
     sys2 = f"{system}\n\nReply with ONLY a JSON object matching this JSON Schema, no other text:\n{schema_txt}"
@@ -96,7 +96,7 @@ async def llm_turn(ctx, role: str, messages: list, tools: list | None = None,
     is emitted live as `answer.delta`. If the turn turns out to contain tool calls, or a retry
     happens after text was emitted, an `answer.reset` event tells the client to discard it.
     """
-    from app.engine.trace_logger import get_trace_logger
+    from app.services.agent_trace import get_trace_logger
     trace = get_trace_logger(ctx.run_id)
     
     log.info(f"🎯 [LLM_TURN/{role.upper()}] Starting (tools: {len(tools) if tools else 0}, stream: {stream_answer})")
