@@ -346,8 +346,13 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         graph_start = time.time()
         
         final_state = dict(initial_state)
+        execution_style = getattr(ctx.config, "execution_style", "graph_workflow")
         workflow_definition = getattr(ctx.config, "workflow_definition", None)
-        if workflow_definition:
+        if execution_style == "single_orchestration":
+            from app.engine.single_orchestration import run_single_orchestration
+            final_state.update(await run_single_orchestration(initial_state, config))
+            await _persist_run_checkpoint(run_id, ctx, final_state)
+        elif workflow_definition:
             from app.engine.workflow_runner import run_workflow
             final_state.update(await run_workflow(ctx, run_id, workflow_definition))
             await _persist_run_checkpoint(run_id, ctx, final_state)

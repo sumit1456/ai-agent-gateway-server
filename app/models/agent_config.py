@@ -22,6 +22,7 @@ class AgentConfig(BaseModel):
     provider_id: str
     workflow_version_id: str
     workflow_definition: dict | None = None
+    execution_style: Literal["graph_workflow", "single_orchestration"] = "graph_workflow"
     models: RoleModels
     system_prompt: str                   # Jinja2 template (the agent's persona/rules)
     

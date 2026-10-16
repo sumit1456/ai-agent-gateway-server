@@ -259,6 +259,7 @@ async def create_run(
         "provider_id": str(agent.provider_id),
         "workflow_version_id": str(agent.workflow_version_id) if agent.workflow_version_id else None,
         "workflow_definition": workflow_definition,
+        "execution_style": agent_cfg.get("execution_style", "graph_workflow"),
         "models": {
             "planner": agent_models.get("planner", "meta-llama/llama-3.1-70b-instruct"),
             "executor": agent_models.get("executor", "meta-llama/llama-3.1-70b-instruct"),
