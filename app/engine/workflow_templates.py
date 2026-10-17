@@ -52,6 +52,76 @@ VIDEO_BLOG = {
     "limits": {"max_steps": 20, "max_retries_per_step": 1},
 }
 
+WORKFLOW_DESIGNER = {
+    "schema_version": 1, "start_node": "understand_brief",
+    "nodes": [
+        _node(
+            "understand_brief", "Understand the brief", "planner",
+            "Translate the user's overview into a workflow specification. Identify the workflow's purpose, trigger/request, required inputs, expected result, constraints, and any tools explicitly named by the user. Do not invent registered tool names. Record assumptions and unresolved questions instead of silently guessing. Return JSON with specification (object), assumptions (array), and questions (array).",
+            {"brief": "$.request"}, {"specification": "object", "assumptions": "array", "questions": "array"},
+        ),
+        _node(
+            "draft_workflow", "Draft the workflow", "executor",
+            "Create an editable workflow definition from the specification. Use only supported node roles: planner, executor, reviewer, direct, controller, router, and finalizer. Give every node a unique stable id, useful name, clear instructions, JSON input_mapping, JSON output_schema, explicit tools list, and max_attempts from 1 to 3. Map later-node inputs only to the original request, variables, or outputs of earlier nodes. Add valid edges and make every node reachable from start_node. Use no tools unless the user explicitly named a tool. Return the complete definition under workflow (object), plus rationale (string).",
+            {"brief": "$.request", "specification": "$.steps.understand_brief.output.specification", "assumptions": "$.steps.understand_brief.output.assumptions", "questions": "$.steps.understand_brief.output.questions"},
+            {"workflow": "object", "rationale": "string"},
+        ),
+        _node(
+            "review_workflow", "Check the workflow", "reviewer",
+            "Check the draft against the specification and supported workflow format. Verify start_node, unique node ids, supported roles, non-empty instructions, valid input references, valid edges, and reachability. Check that output_schema values are types rather than source paths, and that tools were named by the user. Fix issues directly in the workflow definition. Return workflow (object), valid (boolean), and notes (array).",
+            {"specification": "$.steps.understand_brief.output.specification", "draft": "$.steps.draft_workflow.output.workflow", "rationale": "$.steps.draft_workflow.output.rationale"},
+            {"workflow": "object", "valid": "boolean", "notes": "array"},
+        ),
+        _node(
+            "present_draft", "Present the editable draft", "finalizer",
+            "Present the reviewed workflow definition as JSON, followed by a concise explanation of its steps, assumptions, unresolved questions, and any tools that must be registered or assigned. This workflow only drafts a configuration; do not claim it has been saved or deployed. Preserve the workflow JSON exactly so the user can copy and edit it.",
+            {"workflow": "$.steps.review_workflow.output.workflow", "valid": "$.steps.review_workflow.output.valid", "notes": "$.steps.review_workflow.output.notes", "assumptions": "$.steps.understand_brief.output.assumptions", "questions": "$.steps.understand_brief.output.questions"},
+            {"workflow": "object", "explanation": "string"},
+        ),
+    ],
+    "edges": [
+        {"from": "understand_brief", "to": "draft_workflow"},
+        {"from": "draft_workflow", "to": "review_workflow"},
+        {"from": "review_workflow", "to": "present_draft"},
+    ],
+    "limits": {"max_steps": 4, "max_retries_per_step": 1},
+}
+
+AGENT_DESIGNER = {
+    "schema_version": 1, "start_node": "understand_agent_brief",
+    "nodes": [
+        _node(
+            "understand_agent_brief", "Understand the agent brief", "planner",
+            "Translate the user's overview into an agent specification. Identify agent name and purpose, users, example requests, inputs, expected responses, constraints, and tools or knowledge needs explicitly mentioned. Do not invent registered tools or claim credentials are configured. Record assumptions and unresolved questions. Return JSON with specification (object), assumptions (array), and questions (array).",
+            {"brief": "$.request"}, {"specification": "object", "assumptions": "array", "questions": "array"},
+        ),
+        _node(
+            "design_agent", "Design the agent and workflow", "executor",
+            "Create a draft agent identity and a complete editable workflow from the specification. Return agent (object) with name, purpose, and a concise description, and workflow (object) using schema_version 1. The workflow must use supported roles, unique ids, non-empty semantic instructions, JSON input_mapping and output_schema, explicit tools arrays, reachable nodes, valid edges, and max_attempts from 1 to 3. Use only tools explicitly named in the brief; otherwise use empty tool lists and identify the tool or knowledge-base requirements as setup notes. Do not invent provider credentials, model IDs, or claim anything has been saved. Include rationale (string) and setup_notes (array).",
+            {"brief": "$.request", "specification": "$.steps.understand_agent_brief.output.specification", "assumptions": "$.steps.understand_agent_brief.output.assumptions", "questions": "$.steps.understand_agent_brief.output.questions"},
+            {"agent": "object", "workflow": "object", "rationale": "string", "setup_notes": "array"},
+        ),
+        _node(
+            "review_agent", "Review the agent draft", "reviewer",
+            "Review the agent identity and workflow for consistency with the specification. Validate workflow structure, node ids, supported roles, input references, output type declarations, edges, reachability, tool assignments, and unsupported assumptions. Correct the workflow directly. Do not create model IDs or claim the result is persisted. Return agent (object), workflow (object), valid (boolean), and notes (array).",
+            {"specification": "$.steps.understand_agent_brief.output.specification", "agent": "$.steps.design_agent.output.agent", "workflow": "$.steps.design_agent.output.workflow", "setup_notes": "$.steps.design_agent.output.setup_notes"},
+            {"agent": "object", "workflow": "object", "valid": "boolean", "notes": "array"},
+        ),
+        _node(
+            "present_agent_draft", "Present the editable agent draft", "finalizer",
+            "Present the reviewed agent identity and workflow JSON, then list setup notes, assumptions, unresolved questions, and the workflow roles for which the user must choose configured models. Explain that the user must select their configured provider/models and save this workflow and agent in the UI. Do not claim that the agent has been created, saved, or deployed. Preserve the JSON so it can be copied and edited.",
+            {"agent": "$.steps.review_agent.output.agent", "workflow": "$.steps.review_agent.output.workflow", "valid": "$.steps.review_agent.output.valid", "notes": "$.steps.review_agent.output.notes", "assumptions": "$.steps.understand_agent_brief.output.assumptions", "questions": "$.steps.understand_agent_brief.output.questions"},
+            {"agent": "object", "workflow": "object", "explanation": "string"},
+        ),
+    ],
+    "edges": [
+        {"from": "understand_agent_brief", "to": "design_agent"},
+        {"from": "design_agent", "to": "review_agent"},
+        {"from": "review_agent", "to": "present_agent_draft"},
+    ],
+    "limits": {"max_steps": 4, "max_retries_per_step": 1},
+}
+
 # The adaptive option makes the controller an explicit workflow node. It can only
 # choose one of the transitions defined below.
 ADAPTIVE = {
@@ -118,6 +188,8 @@ DYNAMIC["nodes"][3]["tools"] = ["get_conversation_history", "semantic_search"]
 DYNAMIC["nodes"][5]["tools"] = ["get_conversation_history", "semantic_search"]
 
 PRESETS = [
+    {"id": "workflow-designer", "name": "AI Workflow Designer", "description": "Turn a plain-language brief into a reviewed, editable workflow JSON draft.", "definition": WORKFLOW_DESIGNER},
+    {"id": "agent-designer", "name": "AI Agent Designer", "description": "Turn a plain-language brief into an agent profile and a reviewed, editable workflow JSON draft.", "definition": AGENT_DESIGNER},
     {"id": "simple", "name": "Plan → Execute → Finalize", "description": "A straightforward workflow for general multi-step tasks.", "definition": SIMPLE},
     {"id": "reviewed", "name": "Plan → Execute → Review → Finalize", "description": "Adds a separate quality check before the result is presented.", "definition": REVIEWED},
     {"id": "adaptive", "name": "Adaptive direct or planned workflow", "description": "Starts with a routing decision to select a direct answer or planned work.", "definition": ADAPTIVE},
