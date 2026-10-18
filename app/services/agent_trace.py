@@ -145,37 +145,24 @@ class TraceLogger:
                 self._write(f"│ ... ({len(lines) - max_lines} more lines)")
             self._write("│")
         
-        # Log response if provided
-        if response:
+        # Log the complete response payload, including metadata and tool calls.
+        if response is not None:
             self._write("├" + "─" * 78 + "┤")
             self._write("│ 💬 RESPONSE:")
             self._write("│ " + "─" * 76)
-            
-            # Get response content
-            resp_content = ""
-            if hasattr(response, 'content'):
-                resp_content = str(response.content)
+
+            if hasattr(response, 'model_dump'):
+                response_data = response.model_dump(mode="json")
+            elif hasattr(response, '__dict__'):
+                response_data = response.__dict__
             else:
-                resp_content = str(response)
-            
-            # Check for tool calls
-            if hasattr(response, 'tool_calls') and response.tool_calls:
-                self._write(f"│ 🔧 Tool Calls: {len(response.tool_calls)}")
-                for tc in response.tool_calls:
-                    self._write(f"│   - {tc.get('name', 'unknown')}({str(tc.get('args', {}))[:50]}...)")
-                self._write("│")
-            
-            # Log response content (condensed)
-            resp_lines = resp_content.split('\n')
-            max_lines = 10
-            for line in resp_lines[:max_lines]:
-                if len(line) > 76:
-                    self._write(f"│ {line[:73]}...")
-                else:
-                    self._write(f"│ {line}")
-            
-            if len(resp_lines) > max_lines:
-                self._write(f"│ ... ({len(resp_lines) - max_lines} more lines)")
+                response_data = response
+            try:
+                response_json = json.dumps(response_data, ensure_ascii=False, indent=2, default=str)
+            except (TypeError, ValueError):
+                response_json = json.dumps(str(response), ensure_ascii=False, indent=2)
+            for line in response_json.splitlines():
+                self._write(f"│ {line}")
         
         self._write("└" + "─" * 78 + "┘")
         self._write("")
