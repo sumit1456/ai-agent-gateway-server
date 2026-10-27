@@ -9,12 +9,23 @@ class LLMProvider(ABC):
     validation_model: str      # a cheap model id used for the key test call
 
     def get_chat_model(self, model: str, api_key: str, temperature: float = 0.3,
-                       max_tokens: int = 2048) -> ChatOpenAI:
+                       max_tokens: int | None = None,
+                       reasoning_effort: str | None = None) -> ChatOpenAI:
         # max_retries=0 on purpose: WE own retries (engine/retry.py).
         # stream_usage=True so token usage is returned while streaming.
-        return ChatOpenAI(model=model, api_key=api_key, base_url=self.base_url,
-                          temperature=temperature, max_tokens=max_tokens,
-                          stream_usage=True, max_retries=0, timeout=60)
+        options = {
+            "model": model,
+            "api_key": api_key,
+            "base_url": self.base_url,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream_usage": True,
+            "max_retries": 0,
+            "timeout": 60,
+        }
+        if reasoning_effort is not None:
+            options["reasoning_effort"] = reasoning_effort
+        return ChatOpenAI(**options)
 
     def auth_headers(self, api_key: str) -> dict:
         return {"Authorization": f"Bearer {api_key}"}

@@ -11,7 +11,8 @@ log = logging.getLogger(__name__)
 async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
                         stream_answer: bool = False,
                         prior_messages: list | None = None,
-                        role: str = "executor") -> tuple[str, int]:
+                        role: str = "executor",
+                        max_tokens: int | None = None) -> tuple[str, int]:
     """
     Mini ReAct loop: model turn -> run tool calls (in parallel) -> feed results -> repeat.
     Returns (final_text, number_of_failed_tool_calls). Raises StopRun on cancel/timeout/budget.
@@ -28,6 +29,16 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
     
     messages = [SystemMessage(content=system), *(prior_messages or []), HumanMessage(content=user)]
     schemas = ctx.tools.schemas(tool_names)
+    advertised_tool_names = [tool.name for tool in schemas]
+    if advertised_tool_names:
+        system = (
+            f"{system}\n\nAVAILABLE TOOL NAMES FOR THIS TURN (exact): "
+            f"{', '.join(advertised_tool_names)}. Call only a tool with one of these exact names. "
+            "Do not invent tool names or treat output fields such as `response` as tools. "
+            "If no listed tool is relevant, answer without calling a tool."
+        )
+    else:
+        system = f"{system}\n\nNo tools are available for this turn. Do not call or invent tools."
     
     log.info(f"📋 [TOOL_LOOP] Tool schemas prepared: {len(schemas)} tools")
     
@@ -51,7 +62,8 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
         llm_start = time.time()
         ai = await llm.llm_turn(ctx, role, messages,
                                 tools=None if (last or not schemas) else schemas,
-                                stream_answer=stream_answer)
+                                stream_answer=stream_answer,
+                                max_tokens=max_tokens)
         llm_duration = int((time.time() - llm_start) * 1000)
         
         log.info(f"🤖 [TOOL_LOOP] LLM responded in {llm_duration}ms")

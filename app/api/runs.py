@@ -253,12 +253,13 @@ async def create_run(
         agent_cfg = agent.config if isinstance(agent.config, dict) else {}
         await set_agent_prompt_config(str(current_user.id), str(agent.id), agent_cfg)
     workflow_definition = None
+    execution_mode = agent_cfg.get("execution_mode", "single")
     if agent.workflow_version_id:
         workflow_version = await db.get(WorkflowVersion, agent.workflow_version_id)
         if not workflow_version or not workflow_version.is_active:
             raise HTTPException(status_code=409, detail="Agent workflow version is missing or inactive")
         workflow_definition = workflow_version.definition
-    if not workflow_definition:
+    if not workflow_definition and execution_mode != "multi_step":
         raise HTTPException(status_code=409, detail="Agent has no active workflow configured")
     agent_models = agent_cfg.get("models") or {}
     workflow_tool_names = {
@@ -272,6 +273,7 @@ async def create_run(
     config_dict = {
         "name": agent.name,
         "provider_id": str(agent.provider_id),
+        "execution_mode": execution_mode,
         "workflow_version_id": str(agent.workflow_version_id) if agent.workflow_version_id else None,
         "workflow_definition": workflow_definition,
         "models": {
@@ -288,17 +290,7 @@ async def create_run(
         "knowledge_base_ids": list(agent_cfg.get("knowledge_base_ids", [])),
         "temperature": agent_cfg.get("temperature", 0.3),
         "context_window_tokens": agent_cfg.get("context_window_tokens", 4096),
-        "limits": agent_cfg.get("limits") or {
-            "max_iterations": 5,
-            "max_tokens_per_run": 50000,
-            "timeout_s": 120,
-            "max_steps": 8,
-            "max_parallel_steps": 3,
-            "max_tool_turns": 4,
-            "max_tool_output_chars": 4000,
-            "max_input_chars": 30_000,
-            "llm_review": True
-        }
+        "limits": Limits.model_validate(agent_cfg.get("limits") or {}).model_dump()
     }
     detailed_trace.record("effective_agent_configuration", config_dict)
     from app.services.agent_trace import get_trace_logger, log_startup_timing

@@ -60,7 +60,8 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
     log_startup_timing(trace, "agent_config_and_persona", config_started)
     detailed_trace.record("workflow_prompt_source", {
         "workflow_version_id": getattr(config, "workflow_version_id", None),
-        "source": "workflow node instructions",
+        "execution_mode": getattr(config, "execution_mode", "single"),
+        "source": "LangGraph role prompts" if getattr(config, "execution_mode", "single") == "multi_step" else "workflow node instructions",
     })
 
     provider_obj = None
@@ -148,7 +149,8 @@ async def build_context(run_id: str, user_id: str, config_dict: dict,
         model = provider_obj.get_chat_model(
             model=model_name,
             api_key=decrypted_api_key,
-            temperature=temps.get(role, config.temperature)
+            temperature=temps.get(role, config.temperature),
+            max_tokens=config.limits.max_tokens_per_node,
         )
         log_startup_timing(trace, f"provider_model_client.{role}", model_started)
         return model
@@ -338,11 +340,13 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         "input": getattr(ctx, "input", ""),
         "agent_id": getattr(ctx, "agent_id", None),
         "workflow_version_id": getattr(ctx.config, "workflow_version_id", None),
+        "execution_mode": getattr(ctx.config, "execution_mode", "single"),
     })
     detailed_trace.record("agent_execution_started", {
         "input": getattr(ctx, "input", ""),
         "agent_id": getattr(ctx, "agent_id", None),
         "workflow_version_id": getattr(ctx.config, "workflow_version_id", None),
+        "execution_mode": getattr(ctx.config, "execution_mode", "single"),
     })
     log.info(f"🚀 [RUN_GRAPH] Starting run_id={run_id}")
     log.info(f"📝 [RUN_GRAPH] Input: {ctx.input if hasattr(ctx, 'input') else 'N/A'}")
@@ -379,10 +383,15 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         
         final_state = dict(initial_state)
         workflow_definition = getattr(ctx.config, "workflow_definition", None)
-        if not workflow_definition:
-            raise RuntimeError("Agent has no active workflow configured")
-        from app.engine.workflow_runner import run_workflow
-        final_state.update(await run_workflow(ctx, run_id, workflow_definition))
+        execution_mode = getattr(ctx.config, "execution_mode", "single")
+        if execution_mode == "multi_step":
+            log.info("Invoking multi-step LangGraph...")
+            final_state.update(await get_graph().ainvoke(initial_state, config))
+        else:
+            if not workflow_definition:
+                raise RuntimeError("Agent has no active workflow configured for single orchestration")
+            from app.engine.workflow_runner import run_workflow
+            final_state.update(await run_workflow(ctx, run_id, workflow_definition))
         await _persist_run_checkpoint(run_id, ctx, final_state)
         
         graph_duration = int((time.time() - graph_start) * 1000)

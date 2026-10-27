@@ -13,7 +13,10 @@ class RoleModels(BaseModel):
 class Limits(BaseModel):
     max_input_chars: int = Field(default=30_000, ge=1, le=200_000)
     max_iterations: int = 5              # reviewer passes before giving up
-    max_tokens_per_run: int = 50_000
+    max_tokens_per_run: int = Field(default=100_000, ge=1, le=1_000_000)
+    # Default completion ceiling for each workflow node. A node may override
+    # this with its own `max_tokens` value.
+    max_tokens_per_node: int = Field(default=8_192, ge=1, le=200_000)
     timeout_s: int = 120
     max_steps: int = 8                   # steps per plan
     max_parallel_steps: int = 3
@@ -25,7 +28,8 @@ class Limits(BaseModel):
 class AgentConfig(BaseModel):
     name: str
     provider_id: str
-    workflow_version_id: str
+    execution_mode: Literal["single", "multi_step"] = "single"
+    workflow_version_id: str | None = None
     # Injected from the active WorkflowVersion at run time; not stored in agent config.
     workflow_definition: dict | None = Field(default=None, exclude=True)
     # Derived from workflow node tool assignments when a run starts.

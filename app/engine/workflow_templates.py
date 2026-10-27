@@ -4,10 +4,35 @@ from __future__ import annotations
 import copy
 
 
+_ROLE_TOOL_POLICIES = {
+    "controller": (
+        "Tool policy: do not call tools. Choose exactly one transition from the allowed_next values in the input; "
+        "those values are the complete set of valid choices."
+    ),
+    "planner": (
+        "Tool policy: the available_tools input is the authoritative catalog for this workflow. "
+        "Assign only exact names from that list, only when a step needs them, and leave the tools list empty otherwise. "
+        "Never invent tool names or mistake output fields such as response for tools."
+    ),
+    "executor": (
+        "Tool policy: use only tools assigned to this step and advertised in the current request, with exact names. "
+        "Never invent tool names or mistake output fields such as response for tools. "
+        "If no assigned tool applies, proceed without a tool when possible or report the missing capability."
+    ),
+    "direct": (
+        "Tool policy: use only tools assigned to this step and advertised in the current request, with exact names. "
+        "Never invent tool names or mistake output fields such as response for tools. "
+        "If no assigned tool is relevant, answer without a tool."
+    ),
+    "reviewer": "Tool policy: do not call tools; review only the evidence included in your input.",
+    "finalizer": "Tool policy: do not call tools; use only the supplied request, results, and evidence.",
+}
+
+
 def _node(node_id: str, name: str, role: str, instructions: str, input_mapping=None, output_schema=None):
     return {
         "id": node_id, "type": "agent", "name": name, "role": role,
-        "instructions": instructions,
+        "instructions": f"{instructions.rstrip()}\n\n{_ROLE_TOOL_POLICIES.get(role, '')}".strip(),
         "input_mapping": input_mapping or {"request": "$.request"},
         "output_schema": output_schema or {"response": "string"},
         "tools": [], "max_attempts": 1,
@@ -17,19 +42,17 @@ def _node(node_id: str, name: str, role: str, instructions: str, input_mapping=N
 SIMPLE = {
     "schema_version": 1, "start_node": "plan",
     "nodes": [
-        _node("plan", "Plan", "planner", "Return a complete, self-contained JSON plan in a steps array. Include concrete tasks, dependencies, required inputs, assigned tools, and success criteria. Executors will receive only this plan, so include the request details they need in the relevant task or input. Prior conversation messages are not automatically included; if needed, assign get_conversation_history to the executor task. Use semantic_search only when useful and available.", output_schema={"steps": "array"}),
+        _node("plan", "Plan", "planner", "Return a complete, self-contained JSON plan in a steps array. Include concrete tasks, dependencies, required inputs, assigned tools, and success criteria. Executors will receive only this plan, so include the request details they need in the relevant task or input. Prior conversation messages are not automatically included; assign get_conversation_history only if it appears in available_tools and the request needs earlier context. Use semantic_search only if it appears in available_tools and knowledge retrieval is useful.", output_schema={"steps": "array"}),
         _node("execute", "Execute", "executor", "Complete the self-contained plan in the supplied steps. Call an assigned tool only when the plan requires it.", {"steps": "$.steps.plan.output.steps"}),
         {**_node("finalize", "Finalize", "finalizer", "Present the completed executor output clearly. Preserve useful details and do not add unsupported claims.", {"work": "$.steps.execute.output"}), "return_input": "work"},
     ],
     "edges": [{"from": "plan", "to": "execute"}, {"from": "execute", "to": "finalize"}],
     "limits": {"max_steps": 12, "max_retries_per_step": 1},
 }
-SIMPLE["nodes"][1]["tools"] = ["get_conversation_history", "semantic_search"]
-
 REVIEWED = {
     "schema_version": 1, "start_node": "plan",
     "nodes": [
-        _node("plan", "Plan", "planner", "Return a complete, self-contained JSON plan in a steps array. Include concrete tasks, dependencies, required inputs, assigned tools, and success criteria. Executors will receive only this plan, so include the request details they need in the relevant task or input. Prior conversation messages are not automatically included; if needed, assign get_conversation_history to the executor task. Use semantic_search only when useful and available.", output_schema={"steps": "array"}),
+        _node("plan", "Plan", "planner", "Return a complete, self-contained JSON plan in a steps array. Include concrete tasks, dependencies, required inputs, assigned tools, and success criteria. Executors will receive only this plan, so include the request details they need in the relevant task or input. Prior conversation messages are not automatically included; assign get_conversation_history only if it appears in available_tools and the request needs earlier context. Use semantic_search only if it appears in available_tools and knowledge retrieval is useful.", output_schema={"steps": "array"}),
         _node("execute", "Execute", "executor", "Complete the self-contained plan in the supplied steps. Call an assigned tool only when the plan requires it.", {"steps": "$.steps.plan.output.steps"}),
         _node("review", "Review", "reviewer", "Review the plan and execution output against the stated goals and criteria. Return JSON with passed (boolean) and feedback (string).", {"plan": "$.steps.plan.output.steps", "work": "$.steps.execute.output"}, {"passed": "boolean", "feedback": "string"}),
         _node("finalize", "Finalize", "finalizer", "Present the reviewed executor output clearly, applying review feedback where appropriate.", {"work": "$.steps.execute.output", "review": "$.steps.review.output"}),
@@ -37,8 +60,6 @@ REVIEWED = {
     "edges": [{"from": "plan", "to": "execute"}, {"from": "execute", "to": "review"}, {"from": "review", "to": "finalize"}],
     "limits": {"max_steps": 16, "max_retries_per_step": 1},
 }
-REVIEWED["nodes"][1]["tools"] = ["get_conversation_history", "semantic_search"]
-
 VIDEO_BLOG = {
     "schema_version": 1, "start_node": "transcript",
     "nodes": [
@@ -62,62 +83,27 @@ WORKFLOW_DESIGNER = {
         ),
         _node(
             "draft_workflow", "Draft the workflow", "executor",
-            "Create an editable workflow definition from the specification. Use only supported node roles: planner, executor, reviewer, direct, controller, router, and finalizer. Give every node a unique stable id, useful name, clear instructions, JSON input_mapping, JSON output_schema, explicit tools list, and max_attempts from 1 to 3. Map later-node inputs only to the original request, variables, or outputs of earlier nodes. Add valid edges and make every node reachable from start_node. Use no tools unless the user explicitly named a tool. Return the complete definition under workflow (object), plus rationale (string).",
+            "Create an editable schema_version 1 workflow definition. Every node must have a unique id, type agent, name, supported role, non-empty instructions, input_mapping object, output_schema object, tools array, and max_attempts from 1 to 3. Supported roles are planner, executor, reviewer, direct, controller, router, and finalizer. Treat input_mapping keys as the exact JSON fields a node receives and values as source paths. Valid sources are $.request (user request string), $.variables (agent variables object), $.steps, $.steps.<earlier_node_id>.output, a nested key under an earlier node's output, or $.steps.<earlier_node_id>.status. The start node can map only $.request and/or $.variables. Later nodes receive only mapped fields; never assume prior outputs are passed automatically. Treat every output_schema key as required. Return exactly one JSON object with all those keys and values of the declared types (string, number, integer, boolean, object, array); output_schema values are types, never paths. Do not return prose or Markdown outside that object. Use empty tools arrays unless the user explicitly names an available tool; never invent tool names. Follow the working Simple preset pattern: planner output maps into executor input using $.steps.<plan_id>.output.<field>, and the finalizer maps the executor's complete output. Follow the Reviewed preset pattern by mapping plan and work into a reviewer that returns passed:boolean and feedback:string. For branching, follow the Dynamic preset pattern: a controller receives allowed_next, returns next:string, and chooses exactly one value matched by an outgoing edge when:{next:<allowed value>}. Other conditions must match declared output keys and types. Make each transition unambiguous and provide at most one default edge. When a brief requests N retries, implement exactly N bounded rework/re-review opportunities after the first review and add a terminal route after the final retry; do not rely only on max_steps or max_attempts to end a loop. Include schema_version, start_node, nodes, edges, and limits with max_steps from 1 to 100. All nodes must be reachable and edges must reference existing ids. Also create test_run_request as an API run body with a realistic non-empty input string and variables object, tailored to the first node's input_mapping. Return the complete definition under workflow (object), test_run_request (object), plus rationale (string).",
             {"brief": "$.request", "specification": "$.steps.understand_brief.output.specification", "assumptions": "$.steps.understand_brief.output.assumptions", "questions": "$.steps.understand_brief.output.questions"},
-            {"workflow": "object", "rationale": "string"},
+            {"workflow": "object", "test_run_request": "object", "rationale": "string"},
         ),
         _node(
             "review_workflow", "Check the workflow", "reviewer",
-            "Check the draft against the specification and supported workflow format. Verify start_node, unique node ids, supported roles, non-empty instructions, valid input references, valid edges, and reachability. Check that output_schema values are types rather than source paths, and that tools were named by the user. Fix issues directly in the workflow definition. Return workflow (object), valid (boolean), and notes (array).",
-            {"specification": "$.steps.understand_brief.output.specification", "draft": "$.steps.draft_workflow.output.workflow", "rationale": "$.steps.draft_workflow.output.rationale"},
-            {"workflow": "object", "valid": "boolean", "notes": "array"},
+            "Check the workflow and sample test request against the specification and actual runtime. Verify schema_version 1, start_node, unique node ids, type agent, supported roles, non-empty instructions, and every node input_mapping: keys are the node's actual input field names; each value is a supported path that exists earlier in that workflow; and every field used by its instructions is mapped. Verify every output_schema key is required by the node prompt, uses one supported type, and is returned by downstream references under the correct key. Check test_run_request.input is a non-empty string and variables is an object that can supply the first node's mapped $.request and/or $.variables; the start node cannot depend on prior steps. Also verify tools arrays, max_attempts 1-3, max_steps 1-100, valid edge endpoints, reachability, and a terminal node. Verify tools were named by the user and do not invent them. For controller nodes, require next:string and matching when.next edges; for other conditional edges, require conditions to match declared outputs and be unambiguous. Use the Simple, Reviewed, and Dynamic presets as working patterns for sequential, reviewed, and branched flows. Fix workflow and test_run_request directly. Return workflow (object), test_run_request (object), valid (boolean), and notes (array).",
+            {"specification": "$.steps.understand_brief.output.specification", "draft": "$.steps.draft_workflow.output.workflow", "test_run_request": "$.steps.draft_workflow.output.test_run_request", "rationale": "$.steps.draft_workflow.output.rationale"},
+            {"workflow": "object", "test_run_request": "object", "valid": "boolean", "notes": "array"},
         ),
         _node(
             "present_draft", "Present the editable draft", "finalizer",
-            "Present the reviewed workflow definition as JSON, followed by a concise explanation of its steps, assumptions, unresolved questions, and any tools that must be registered or assigned. This workflow only drafts a configuration; do not claim it has been saved or deployed. Preserve the workflow JSON exactly so the user can copy and edit it.",
-            {"workflow": "$.steps.review_workflow.output.workflow", "valid": "$.steps.review_workflow.output.valid", "notes": "$.steps.review_workflow.output.notes", "assumptions": "$.steps.understand_brief.output.assumptions", "questions": "$.steps.understand_brief.output.questions"},
-            {"workflow": "object", "explanation": "string"},
+            "Present the reviewed workflow definition and test_run_request as separate JSON objects, followed by a concise explanation of the steps, assumptions, unresolved questions, and required tool setup. The test_run_request must be a usable POST /v1/agents/{agent_id}/run request body with input and variables. This workflow only drafts a configuration; do not claim it has been saved or deployed. Preserve both JSON objects exactly so the user can copy and use them.",
+            {"workflow": "$.steps.review_workflow.output.workflow", "test_run_request": "$.steps.review_workflow.output.test_run_request", "valid": "$.steps.review_workflow.output.valid", "notes": "$.steps.review_workflow.output.notes", "assumptions": "$.steps.understand_brief.output.assumptions", "questions": "$.steps.understand_brief.output.questions"},
+            {"workflow": "object", "test_run_request": "object", "explanation": "string"},
         ),
     ],
     "edges": [
         {"from": "understand_brief", "to": "draft_workflow"},
         {"from": "draft_workflow", "to": "review_workflow"},
         {"from": "review_workflow", "to": "present_draft"},
-    ],
-    "limits": {"max_steps": 4, "max_retries_per_step": 1},
-}
-
-AGENT_DESIGNER = {
-    "schema_version": 1, "start_node": "understand_agent_brief",
-    "nodes": [
-        _node(
-            "understand_agent_brief", "Understand the agent brief", "planner",
-            "Translate the user's overview into an agent specification. Identify agent name and purpose, users, example requests, inputs, expected responses, constraints, and tools or knowledge needs explicitly mentioned. Do not invent registered tools or claim credentials are configured. Record assumptions and unresolved questions. Return JSON with specification (object), assumptions (array), and questions (array).",
-            {"brief": "$.request"}, {"specification": "object", "assumptions": "array", "questions": "array"},
-        ),
-        _node(
-            "design_agent", "Design the agent and workflow", "executor",
-            "Create a draft agent identity and a complete editable workflow from the specification. Return agent (object) with name, purpose, and a concise description, and workflow (object) using schema_version 1. The workflow must use supported roles, unique ids, non-empty semantic instructions, JSON input_mapping and output_schema, explicit tools arrays, reachable nodes, valid edges, and max_attempts from 1 to 3. Use only tools explicitly named in the brief; otherwise use empty tool lists and identify the tool or knowledge-base requirements as setup notes. Do not invent provider credentials, model IDs, or claim anything has been saved. Include rationale (string) and setup_notes (array).",
-            {"brief": "$.request", "specification": "$.steps.understand_agent_brief.output.specification", "assumptions": "$.steps.understand_agent_brief.output.assumptions", "questions": "$.steps.understand_agent_brief.output.questions"},
-            {"agent": "object", "workflow": "object", "rationale": "string", "setup_notes": "array"},
-        ),
-        _node(
-            "review_agent", "Review the agent draft", "reviewer",
-            "Review the agent identity and workflow for consistency with the specification. Validate workflow structure, node ids, supported roles, input references, output type declarations, edges, reachability, tool assignments, and unsupported assumptions. Correct the workflow directly. Do not create model IDs or claim the result is persisted. Return agent (object), workflow (object), valid (boolean), and notes (array).",
-            {"specification": "$.steps.understand_agent_brief.output.specification", "agent": "$.steps.design_agent.output.agent", "workflow": "$.steps.design_agent.output.workflow", "setup_notes": "$.steps.design_agent.output.setup_notes"},
-            {"agent": "object", "workflow": "object", "valid": "boolean", "notes": "array"},
-        ),
-        _node(
-            "present_agent_draft", "Present the editable agent draft", "finalizer",
-            "Present the reviewed agent identity and workflow JSON, then list setup notes, assumptions, unresolved questions, and the workflow roles for which the user must choose configured models. Explain that the user must select their configured provider/models and save this workflow and agent in the UI. Do not claim that the agent has been created, saved, or deployed. Preserve the JSON so it can be copied and edited.",
-            {"agent": "$.steps.review_agent.output.agent", "workflow": "$.steps.review_agent.output.workflow", "valid": "$.steps.review_agent.output.valid", "notes": "$.steps.review_agent.output.notes", "assumptions": "$.steps.understand_agent_brief.output.assumptions", "questions": "$.steps.understand_agent_brief.output.questions"},
-            {"agent": "object", "workflow": "object", "explanation": "string"},
-        ),
-    ],
-    "edges": [
-        {"from": "understand_agent_brief", "to": "design_agent"},
-        {"from": "design_agent", "to": "review_agent"},
-        {"from": "review_agent", "to": "present_agent_draft"},
     ],
     "limits": {"max_steps": 4, "max_retries_per_step": 1},
 }
@@ -129,7 +115,7 @@ ADAPTIVE = {
     "nodes": [
         _node("controller", "Choose the next role", "controller", "You control this workflow. Choose exactly one value from the allowed_next list in your input. On the first call choose direct for simple requests or plan for multi-step work. After a plan choose execute. After execution choose review when verification is useful, otherwise finalize. After review choose finalize, or execute to revise. Return JSON with the key next.", {"request": "$.request", "completed_steps": "$.steps"}, {"next": "string"}),
         _node("direct", "Answer directly", "direct", "Answer the request directly.", {"request": "$.request"}),
-        _node("plan", "Plan", "planner", "Create an actionable plan using recent conversation context. If older session history is needed, explicitly assign get_conversation_history to an executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless the request needs it.", {"request": "$.request", "completed_steps": "$.steps"}),
+        _node("plan", "Plan", "planner", "Create an actionable plan using the supplied recent conversation context. If older session history is needed, assign get_conversation_history only if it appears in available_tools. If an attached knowledge base is relevant, assign semantic_search only if it appears in available_tools. Otherwise note that the workflow has no tool assigned for that capability.", {"request": "$.request", "completed_steps": "$.steps"}),
         _node("execute", "Execute", "executor", "Carry out the plan, incorporating any review feedback. Call a tool only when the plan requires it and the tool is assigned to this step.", {"request": "$.request", "completed_steps": "$.steps"}),
         _node("review", "Review", "reviewer", "Check the latest work against the request. Return JSON with passed (boolean) and feedback (string).", {"request": "$.request", "completed_steps": "$.steps"}, {"passed": "boolean", "feedback": "string"}),
         _node("finalize", "Finalize", "finalizer", "Present the final result using the completed work and review findings.", {"request": "$.request", "completed_steps": "$.steps"}),
@@ -146,11 +132,9 @@ ADAPTIVE = {
     ],
     "limits": {"max_steps": 16, "max_retries_per_step": 1},
 }
-ADAPTIVE["nodes"][2]["tools"] = ["get_conversation_history", "semantic_search"]
-ADAPTIVE["nodes"][1]["tools"] = ["get_conversation_history", "semantic_search"]
-ADAPTIVE["nodes"][0]["max_attempts"] = 6
+ADAPTIVE["nodes"][0]["max_attempts"] = 3
 ADAPTIVE["nodes"][2]["max_attempts"] = 3
-ADAPTIVE["nodes"][3]["max_attempts"] = 4
+ADAPTIVE["nodes"][3]["max_attempts"] = 3
 ADAPTIVE["nodes"][4]["max_attempts"] = 3
 
 # Dynamic starts with one routing decision, then follows the selected path to
@@ -164,9 +148,9 @@ DYNAMIC = {
             {"request": "$.request"}, {"next": "string"},
         ),
         _node("direct", "Answer directly", "direct", "Answer the request directly and use only tools assigned to this step."),
-        _node("plan", "Plan the work", "planner", "Create a concise actionable plan. Prior conversation messages are not automatically included; if the request depends on earlier turns, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless needed."),
+        _node("plan", "Plan the work", "planner", "Create a concise actionable plan. Use only exact names in available_tools. Assign get_conversation_history only if it appears in available_tools and earlier context is needed; assign semantic_search only if it appears in available_tools and knowledge retrieval is useful. If a required capability is not listed, note that instead of inventing a tool."),
         _node("execute", "Execute the plan", "executor", "Complete the planned task, calling only tools assigned to this step when the plan requires them.", {"request": "$.request", "plan": "$.steps.plan.output"}),
-        _node("review_plan", "Plan work for review", "planner", "Create a concise actionable plan for a task that benefits from verification. Prior conversation messages are not automatically included; if the request depends on earlier turns, explicitly assign get_conversation_history to the executor task. If an attached knowledge base is relevant, explicitly assign semantic_search. Do not retrieve either source unless needed."),
+        _node("review_plan", "Plan work for review", "planner", "Create a concise actionable plan for a task that benefits from verification. Use only exact names in available_tools. Assign get_conversation_history only if it appears in available_tools and earlier context is needed; assign semantic_search only if it appears in available_tools and knowledge retrieval is useful. If a required capability is not listed, note that instead of inventing a tool."),
         _node("review_execute", "Execute reviewed work", "executor", "Complete the planned task, calling only tools assigned to this step when the plan requires them.", {"request": "$.request", "plan": "$.steps.review_plan.output"}),
         _node("review", "Review the result", "reviewer", "Check the completed work against the request. Return JSON with passed (boolean) and feedback (string).", {"request": "$.request", "work": "$.steps.review_execute.output"}, {"passed": "boolean", "feedback": "string"}),
         _node("finalize", "Present the result", "finalizer", "Present the result from the selected path clearly.", {"request": "$.request", "completed_steps": "$.steps"}),
@@ -183,13 +167,8 @@ DYNAMIC = {
     ],
     "limits": {"max_steps": 12, "max_retries_per_step": 1},
 }
-DYNAMIC["nodes"][1]["tools"] = ["get_conversation_history", "semantic_search"]
-DYNAMIC["nodes"][3]["tools"] = ["get_conversation_history", "semantic_search"]
-DYNAMIC["nodes"][5]["tools"] = ["get_conversation_history", "semantic_search"]
-
 PRESETS = [
     {"id": "workflow-designer", "name": "AI Workflow Designer", "description": "Turn a plain-language brief into a reviewed, editable workflow JSON draft.", "definition": WORKFLOW_DESIGNER},
-    {"id": "agent-designer", "name": "AI Agent Designer", "description": "Turn a plain-language brief into an agent profile and a reviewed, editable workflow JSON draft.", "definition": AGENT_DESIGNER},
     {"id": "simple", "name": "Plan → Execute → Finalize", "description": "A straightforward workflow for general multi-step tasks.", "definition": SIMPLE},
     {"id": "reviewed", "name": "Plan → Execute → Review → Finalize", "description": "Adds a separate quality check before the result is presented.", "definition": REVIEWED},
     {"id": "adaptive", "name": "Adaptive direct or planned workflow", "description": "Starts with a routing decision to select a direct answer or planned work.", "definition": ADAPTIVE},
@@ -240,10 +219,25 @@ def validate_definition(definition: dict) -> list[str]:
             errors.append(f"Node {node.get('id')} return_input must name a mapped finalizer input")
         if not isinstance(node.get("output_schema", {}), dict):
             errors.append(f"Node {node.get('id')} output_schema must be an object")
+        else:
+            allowed_output_types = {"string", "number", "integer", "boolean", "object", "array", "null"}
+            for field, field_type in node.get("output_schema", {}).items():
+                field_types = field_type if isinstance(field_type, list) else [field_type]
+                if not field_types or any(not isinstance(item, str) or item not in allowed_output_types for item in field_types):
+                    errors.append(
+                        f"Node {node.get('id')} output_schema field {field!r} must use supported types; use [\"string\", \"null\"] for nullable text"
+                    )
         if not isinstance(node.get("tools", []), list) or any(not isinstance(tool, str) for tool in node.get("tools", [])):
             errors.append(f"Node {node.get('id')} tools must be a list of names")
         if not isinstance(node.get("max_attempts", 1), int) or not 1 <= node.get("max_attempts", 1) <= 3:
             errors.append(f"Node {node.get('id')} max_attempts must be between 1 and 3")
+        node_max_tokens = node.get("max_tokens")
+        if node_max_tokens is not None and (
+            isinstance(node_max_tokens, bool)
+            or not isinstance(node_max_tokens, int)
+            or not 1 <= node_max_tokens <= 200_000
+        ):
+            errors.append(f"Node {node.get('id')} max_tokens must be an integer between 1 and 200000 when specified")
     for edge in edges:
         if not isinstance(edge, dict) or edge.get("from") not in by_id or edge.get("to") not in by_id:
             errors.append("Every edge must reference existing from/to nodes")

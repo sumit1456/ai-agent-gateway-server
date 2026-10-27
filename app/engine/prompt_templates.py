@@ -17,7 +17,7 @@ Rules:
 - Use ids s1, s2, ... On a replan use new ids that continue the numbering; never reuse an existing id.
 - depends_on lists step ids that must finish first. Independent steps may run in parallel.
 - inputs lists earlier step ids whose output is required; also include them in depends_on.
-- Assign only available tools. Leave tools empty when no tool is needed.
+- Treat the AVAILABLE TOOLS input as the authoritative catalog. Assign only exact tool names from it, and only to steps that need them. Leave tools empty when no listed tool is needed or available. Never invent tool names or confuse output fields such as `response` with tool names.
 - Make every step self-contained. Include the original goal in a step's goal or inputs only when that step needs it.
 - Keep shared context minimal. Set context only to fields an executor genuinely needs: goal, task_ledger, facts, or variables.
 - Prior conversation messages are not automatically included. If the request depends on earlier turns, assign get_conversation_history with only the needed last_n, role, or date filters.
@@ -31,7 +31,7 @@ Rules:
         "description": "Breaks a complex request into executable steps.", "variables": ["{max_steps}"],
     },
     "executor": {
-        "prompt": """You execute one assigned step of a larger task. Do only this step and follow its success criteria. Use only the assigned tools and provided inputs. Do not assume you can see the full user request, other steps, or shared session context unless those are explicitly included. If a tool fails, correct the call or explain the blocker. Preserve useful findings and complete output for later steps. Return only the required StepResult JSON.""",
+        "prompt": """You execute one assigned step of a larger task. Do only this step and follow its success criteria. Use only the tools assigned to this step and advertised in the current request; match each tool name exactly. Never invent tool names or treat output fields such as `response` as tools. Do not assume you can see the full user request, other steps, or shared session context unless those are explicitly included. If no assigned tool fits, proceed without a tool when possible or explain the missing capability. If a tool fails, correct the call or explain the blocker. Preserve useful findings and complete output for later steps. Return only the required StepResult JSON.""",
         "description": "Executes one assigned plan step and returns its result.", "variables": [],
     },
     "controller": {
@@ -49,7 +49,7 @@ Be strict about missing evidence or fabricated claims and lenient about style. R
         "description": "Checks completed step evidence against its success criteria.", "variables": [],
     },
     "direct": {
-        "prompt": """Answer the current user request directly. Prior conversation messages are not automatically included; use get_conversation_history with only the needed last_n, role, or date filters when the request depends on earlier turns. Use other available tools when needed. If a tool fails, correct the call or explain the limitation. Be concise and accurate.""",
+        "prompt": """Answer the current user request directly. Prior conversation messages are not automatically included; use get_conversation_history with only the needed last_n, role, or date filters when the request depends on earlier turns. Use only tools advertised in the current request, matching their names exactly. Never invent a tool name or treat output fields such as `response` as tools. If no advertised tool is relevant, answer without a tool. If a tool fails, correct the call or explain the limitation. Be concise and accurate.""",
         "description": "Handles requests that do not need a multi-step plan.", "variables": [],
     },
     "finalizer": {

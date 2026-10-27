@@ -98,7 +98,7 @@ async def _plain_json(ctx, role, schema, system, user, attempts, prior_messages=
     raise BadOutputError(f"could not get valid {schema.__name__}: {last}")
 
 async def llm_turn(ctx, role: str, messages: list, tools: list | None = None,
-                   stream_answer: bool = False) -> AIMessage:
+                   stream_answer: bool = False, max_tokens: int | None = None) -> AIMessage:
     """
     One model turn (optionally with tools bound). Streams chunks; if stream_answer is True the text
     is emitted live as `answer.delta`. If the turn turns out to contain tool calls, or a retry
@@ -121,6 +121,8 @@ async def llm_turn(ctx, role: str, messages: list, tools: list | None = None,
     if tools:
         log.info(f"🔧 [LLM_TURN/{role.upper()}] Binding {len(tools)} tools")
         llm = llm.bind_tools(tools)
+    if max_tokens is not None:
+        llm = llm.bind(max_tokens=max_tokens)
     emitted = False
 
     async def call():
