@@ -423,6 +423,8 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
         
         total_duration = int((time.time() - start_time) * 1000)
         total_tokens = ctx.usage.total
+        final_state["model_usage"] = ctx.usage.snapshot()
+        final_state["models"] = ctx.config.models.model_dump(mode="json")
         
         log.info(f"=" * 80)
         log.info(f"🏁 [RUN_GRAPH] EXECUTION SUMMARY for run_id={run_id}")

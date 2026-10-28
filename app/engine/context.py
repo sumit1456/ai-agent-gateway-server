@@ -26,6 +26,7 @@ class EventSink:
 class Usage:
     def __init__(self):
         self.by_role: dict = defaultdict(lambda: {"in": 0, "out": 0})
+        self.estimated_roles: set[str] = set()
 
     def add_message(self, role: str, msg) -> None:
         um = getattr(msg, "usage_metadata", None) or {}
@@ -35,13 +36,17 @@ class Usage:
         else:  # provider returned no usage: rough estimate (~4 chars/token)
             text = msg.content if isinstance(getattr(msg, "content", ""), str) else ""
             self.by_role[role]["out"] += len(text) // 4
+            self.estimated_roles.add(role)
 
     @property
     def total(self) -> int:
         return sum(v["in"] + v["out"] for v in self.by_role.values())
 
     def snapshot(self) -> dict:
-        return {"total_tokens": self.total, "by_role": {k: dict(v) for k, v in self.by_role.items()}}
+        return {
+            "total_tokens": self.total,
+            "by_role": {k: {**v, "estimated": k in self.estimated_roles} for k, v in self.by_role.items()},
+        }
 
 class ArtifactStore:
     """In-memory artifact store for one run. Persisted to Postgres when the run ends."""

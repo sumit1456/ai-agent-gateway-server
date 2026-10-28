@@ -388,7 +388,10 @@ async def get_run(
         "duration_ms": run.duration_ms,
         "created_at": run.created_at.isoformat()
     }
-    response["workflow_transitions"] = (run.state or {}).get("workflow_transitions", [])
+    run_state = run.state if isinstance(run.state, dict) else {}
+    response["workflow_transitions"] = run_state.get("workflow_transitions", [])
+    response["model_usage"] = run_state.get("model_usage")
+    response["models"] = run_state.get("models")
     step_result = await db.exec(select(WorkflowRunStep).where(WorkflowRunStep.run_id == run.id).order_by(WorkflowRunStep.started_at, WorkflowRunStep.id))
     response["workflow_steps"] = [
         {"id": str(step.id), "node_id": step.node_id, "attempt": step.attempt,
@@ -445,7 +448,7 @@ async def list_runs(
         count_query = count_query.where(Run.status == status)
     
     total_result = await db.exec(count_query)
-    total = total_result.one()
+    total = total_result.scalar_one()
     
     return {
         "runs": [
@@ -455,7 +458,9 @@ async def list_runs(
                 "status": run.status,
                 "created_at": run.created_at.isoformat(),
                 "duration_ms": run.duration_ms,
-                "tokens_used": run.tokens_used
+                "tokens_used": run.tokens_used,
+                "model_usage": (run.state or {}).get("model_usage") if isinstance(run.state, dict) else None,
+                "models": (run.state or {}).get("models") if isinstance(run.state, dict) else None,
             }
             for run in runs
         ],
