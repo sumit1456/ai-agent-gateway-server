@@ -359,6 +359,7 @@ async def executor_node(state: RunState, config: RunnableConfig) -> dict:
         trace.log_step_execution(step['id'], step['goal'], res.status)
         await _publish_run_event(ctx.run_id, "node_complete", {
             "node": "executor", "step_id": step["id"], "status": res.status,
+            "summary": clip(res.summary, 400),
         })
     
     # Determine if we need to replan
