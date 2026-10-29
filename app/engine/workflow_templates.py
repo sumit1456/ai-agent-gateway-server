@@ -6,8 +6,8 @@ import copy
 
 _ROLE_TOOL_POLICIES = {
     "controller": (
-        "Tool policy: do not call tools. Choose exactly one transition from the allowed_next values in the input; "
-        "those values are the complete set of valid choices."
+        "Tool policy: do not call tools. For a simple request, return the final answer in response with next set to null. "
+        "Otherwise choose exactly one transition from the allowed_next values in the input."
     ),
     "planner": (
         "Tool policy: the available_tools input is the authoritative catalog for this workflow. "
@@ -83,7 +83,7 @@ WORKFLOW_DESIGNER = {
         ),
         _node(
             "draft_workflow", "Draft the workflow", "executor",
-            "Create an editable schema_version 1 workflow definition. Every node must have a unique id, type agent, name, supported role, non-empty instructions, input_mapping object, output_schema object, tools array, and max_attempts from 1 to 3. Supported roles are planner, executor, reviewer, direct, controller, router, and finalizer. Treat input_mapping keys as the exact JSON fields a node receives and values as source paths. Valid sources are $.request (user request string), $.variables (agent variables object), $.steps, $.steps.<earlier_node_id>.output, a nested key under an earlier node's output, or $.steps.<earlier_node_id>.status. The start node can map only $.request and/or $.variables. Later nodes receive only mapped fields; never assume prior outputs are passed automatically. Treat every output_schema key as required. Return exactly one JSON object with all those keys and values of the declared types (string, number, integer, boolean, object, array); output_schema values are types, never paths. Do not return prose or Markdown outside that object. Use empty tools arrays unless the user explicitly names an available tool; never invent tool names. Follow the working Simple preset pattern: planner output maps into executor input using $.steps.<plan_id>.output.<field>, and the finalizer maps the executor's complete output. Follow the Reviewed preset pattern by mapping plan and work into a reviewer that returns passed:boolean and feedback:string. For branching, follow the Dynamic preset pattern: a controller receives allowed_next, returns next:string, and chooses exactly one value matched by an outgoing edge when:{next:<allowed value>}. Other conditions must match declared output keys and types. Make each transition unambiguous and provide at most one default edge. When a brief requests N retries, implement exactly N bounded rework/re-review opportunities after the first review and add a terminal route after the final retry; do not rely only on max_steps or max_attempts to end a loop. Include schema_version, start_node, nodes, edges, and limits with max_steps from 1 to 100. All nodes must be reachable and edges must reference existing ids. Also create test_run_request as an API run body with a realistic non-empty input string and variables object, tailored to the first node's input_mapping. Return the complete definition under workflow (object), test_run_request (object), plus rationale (string).",
+            "Create an editable schema_version 1 workflow definition. Every node must have a unique id, type agent, name, supported role, non-empty instructions, input_mapping object, output_schema object, tools array, and max_attempts from 1 to 3. Supported roles are planner, executor, reviewer, direct, controller, router, and finalizer. Treat input_mapping keys as the exact JSON fields a node receives and values as source paths. Valid sources are $.request (user request string), $.variables (agent variables object), $.steps, $.steps.<earlier_node_id>.output, a nested key under an earlier node's output, or $.steps.<earlier_node_id>.status. The start node can map only $.request and/or $.variables. Later nodes receive only mapped fields; never assume prior outputs are passed automatically. Treat every output_schema key as required. Return exactly one JSON object with all those keys and values of the declared types (string, number, integer, boolean, object, array); output_schema values are types, never paths. Do not return prose or Markdown outside that object. Use empty tools arrays unless the user explicitly names an available tool; never invent tool names. Follow the working Simple preset pattern: planner output maps into executor input using $.steps.<plan_id>.output.<field>, and the finalizer maps the executor's complete output. Follow the Reviewed preset pattern by mapping plan and work into a reviewer that returns passed:boolean and feedback:string. For branching, a controller receives allowed_next and can either answer a simple request in the same call with next:null and response:string, or route with next set to an allowed value and response:null; declare next and response as nullable string fields. Do not create a separate direct node solely to answer simple requests. Other conditions must match declared output keys and types. Make each transition unambiguous and provide at most one default edge. When a brief requests N retries, implement exactly N bounded rework/re-review opportunities after the first review and add a terminal route after the final retry; do not rely only on max_steps or max_attempts to end a loop. Include schema_version, start_node, nodes, edges, and limits with max_steps from 1 to 100. All nodes must be reachable and edges must reference existing ids. Also create test_run_request as an API run body with a realistic non-empty input string and variables object, tailored to the first node's input_mapping. Return the complete definition under workflow (object), test_run_request (object), plus rationale (string).",
             {"brief": "$.request", "specification": "$.steps.understand_brief.output.specification", "assumptions": "$.steps.understand_brief.output.assumptions", "questions": "$.steps.understand_brief.output.questions"},
             {"workflow": "object", "test_run_request": "object", "rationale": "string"},
         ),
@@ -113,15 +113,13 @@ WORKFLOW_DESIGNER = {
 ADAPTIVE = {
     "schema_version": 1, "start_node": "controller",
     "nodes": [
-        _node("controller", "Choose the next role", "controller", "You control this workflow. Choose exactly one value from the allowed_next list in your input. On the first call choose direct for simple requests or plan for multi-step work. After a plan choose execute. After execution choose review when verification is useful, otherwise finalize. After review choose finalize, or execute to revise. Return JSON with the key next.", {"request": "$.request", "completed_steps": "$.steps"}, {"next": "string"}),
-        _node("direct", "Answer directly", "direct", "Answer the request directly.", {"request": "$.request"}),
+        _node("controller", "Choose the next role", "controller", "You control this workflow. On the first call, answer simple requests directly in the response field. For multi-step work choose plan. After a plan choose execute. After execution choose review when verification is useful, otherwise finalize. After review choose finalize, or execute to revise. When answering directly set next to null; when routing set response to null and choose exactly one allowed_next value.", {"request": "$.request", "completed_steps": "$.steps"}, {"next": ["string", "null"], "response": ["string", "null"]}),
         _node("plan", "Plan", "planner", "Create an actionable plan using the supplied recent conversation context. If older session history is needed, assign get_conversation_history only if it appears in available_tools. If an attached knowledge base is relevant, assign semantic_search only if it appears in available_tools. Otherwise note that the workflow has no tool assigned for that capability.", {"request": "$.request", "completed_steps": "$.steps"}),
         _node("execute", "Execute", "executor", "Carry out the plan, incorporating any review feedback. Call a tool only when the plan requires it and the tool is assigned to this step.", {"request": "$.request", "completed_steps": "$.steps"}),
         _node("review", "Review", "reviewer", "Check the latest work against the request. Return JSON with passed (boolean) and feedback (string).", {"request": "$.request", "completed_steps": "$.steps"}, {"passed": "boolean", "feedback": "string"}),
         _node("finalize", "Finalize", "finalizer", "Present the final result using the completed work and review findings.", {"request": "$.request", "completed_steps": "$.steps"}),
     ],
     "edges": [
-        {"from": "controller", "to": "direct", "when": {"next": "direct"}},
         {"from": "controller", "to": "plan", "when": {"next": "plan"}},
         {"from": "controller", "to": "execute", "when": {"next": "execute"}},
         {"from": "controller", "to": "review", "when": {"next": "review"}},
@@ -133,9 +131,8 @@ ADAPTIVE = {
     "limits": {"max_steps": 16, "max_retries_per_step": 1},
 }
 ADAPTIVE["nodes"][0]["max_attempts"] = 3
-ADAPTIVE["nodes"][2]["max_attempts"] = 3
-ADAPTIVE["nodes"][3]["max_attempts"] = 3
-ADAPTIVE["nodes"][4]["max_attempts"] = 3
+for _node_id in ("controller", "plan", "execute", "review"):
+    next(node for node in ADAPTIVE["nodes"] if node["id"] == _node_id)["max_attempts"] = 3
 
 # Dynamic starts with one routing decision, then follows the selected path to
 # completion. Each route is explicit and editable in the workflow builder.
@@ -144,10 +141,9 @@ DYNAMIC = {
     "nodes": [
         _node(
             "choose_path", "Choose a path", "controller",
-            "Choose exactly one next value from the allowed_next list. Use direct for a simple request; use plan for work that benefits from a plan; use reviewed_plan when the task is complex, factual, or benefits from a quality check. The workflow will continue along the selected path to completion. Return JSON with key next.",
-            {"request": "$.request"}, {"next": "string"},
+            "For a simple request, answer it directly in response and set next to null. For work that benefits from a plan, choose plan; for complex, factual, or verification-sensitive work choose reviewed_plan. When choosing a route, set response to null and choose exactly one allowed_next value. The workflow will continue along the selected path to completion.",
+            {"request": "$.request"}, {"next": ["string", "null"], "response": ["string", "null"]},
         ),
-        _node("direct", "Answer directly", "direct", "Answer the request directly and use only tools assigned to this step."),
         _node("plan", "Plan the work", "planner", "Create a concise actionable plan. Use only exact names in available_tools. Assign get_conversation_history only if it appears in available_tools and earlier context is needed; assign semantic_search only if it appears in available_tools and knowledge retrieval is useful. If a required capability is not listed, note that instead of inventing a tool."),
         _node("execute", "Execute the plan", "executor", "Complete the planned task, calling only tools assigned to this step when the plan requires them.", {"request": "$.request", "plan": "$.steps.plan.output"}),
         _node("review_plan", "Plan work for review", "planner", "Create a concise actionable plan for a task that benefits from verification. Use only exact names in available_tools. Assign get_conversation_history only if it appears in available_tools and earlier context is needed; assign semantic_search only if it appears in available_tools and knowledge retrieval is useful. If a required capability is not listed, note that instead of inventing a tool."),
@@ -156,7 +152,6 @@ DYNAMIC = {
         _node("finalize", "Present the result", "finalizer", "Present the result from the selected path clearly.", {"request": "$.request", "completed_steps": "$.steps"}),
     ],
     "edges": [
-        {"from": "choose_path", "to": "direct", "when": {"next": "direct"}},
         {"from": "choose_path", "to": "plan", "when": {"next": "plan"}},
         {"from": "choose_path", "to": "review_plan", "when": {"next": "reviewed_plan"}},
         {"from": "plan", "to": "execute"},
@@ -171,8 +166,8 @@ PRESETS = [
     {"id": "workflow-designer", "name": "AI Workflow Designer", "description": "Turn a plain-language brief into a reviewed, editable workflow JSON draft.", "definition": WORKFLOW_DESIGNER},
     {"id": "simple", "name": "Plan → Execute → Finalize", "description": "A straightforward workflow for general multi-step tasks.", "definition": SIMPLE},
     {"id": "reviewed", "name": "Plan → Execute → Review → Finalize", "description": "Adds a separate quality check before the result is presented.", "definition": REVIEWED},
-    {"id": "adaptive", "name": "Adaptive direct or planned workflow", "description": "Starts with a routing decision to select a direct answer or planned work.", "definition": ADAPTIVE},
-    {"id": "dynamic", "name": "Dynamic workflow", "description": "A routing agent chooses a direct, planned, or reviewed path, then the workflow follows that path to completion. Use this for general-purpose requests.", "definition": DYNAMIC},
+    {"id": "adaptive", "name": "Adaptive answer or planned workflow", "description": "Answers simple requests in the routing call and routes multi-step work through planning and execution.", "definition": ADAPTIVE},
+    {"id": "dynamic", "name": "Dynamic workflow", "description": "A routing agent answers simple requests in one call or chooses a planned or reviewed path for complex work. Use this for general-purpose requests.", "definition": DYNAMIC},
     {"id": "video-blog", "name": "Video transcript → Blog post", "description": "Prepare a transcript, plan a blog post, draft it, review it, and format the final post.", "definition": VIDEO_BLOG},
 ]
 

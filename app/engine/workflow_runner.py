@@ -279,13 +279,26 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
                 for edge in definition["edges"]
                 if edge.get("from") == current and edge.get("when", {}).get("next")
             ]
+            step_input["controller_output_contract"] = (
+                "These controller rules override conflicting routing instructions above. If a simple request "
+                "can be answered without another workflow node, answer it now: set next to null and response "
+                "to the final answer. For work that needs another node, set response to null and next to "
+                "exactly one value from allowed_next. Use a direct route only when that existing workflow "
+                "specifically requires its direct node, such as for assigned tools."
+            )
+        output_schema = node.get("output_schema") or {"response": "string"}
+        if role == "controller":
+            # A controller can terminate the workflow with its own answer, avoiding
+            # a second model call for simple requests. Keep next nullable for that case.
+            output_schema = {"next": ["string", "null"], "response": ["string", "null"]}
         system = (
             f"{ctx.persona}\n\nWORKFLOW STEP: {node.get('name', current)}\n"
             f"Follow the workflow step instructions and output contract exactly.\n{node['instructions']}\n"
+            f"{step_input.get('controller_output_contract', '')}\n"
             f"Return exactly one valid JSON object. Include every required key, use the declared types, and put any prose inside string values. "
             f"Do not return Markdown, code fences, a preamble, or text outside the JSON object.\n"
             f"Required keys and value types: "
-            f"{json.dumps(node.get('output_schema') or {'response': 'string'})}."
+            f"{json.dumps(output_schema)}."
         )
         user = "WORKFLOW STEP INPUT:\n" + json.dumps(step_input, ensure_ascii=False, default=str)
         from app.services.agent_trace import log_startup_timing
@@ -327,7 +340,6 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
                 text = _content_to_text(response.content)
                 trace.log_llm_call(role, len(system) + len(user), len(text), int((time.perf_counter() - llm_started) * 1000))
             reply_started = time.perf_counter()
-            output_schema = node.get("output_schema") or {}
             try:
                 output = _parse_output(text, output_schema)
             except (ValueError, TypeError, json.JSONDecodeError) as parse_error:
@@ -376,6 +388,10 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
                 await db.commit()
             await _publish_run_event(run_id, "workflow_step_failed", {"node_id": current, "error": str(exc)[:1000]})
             raise
+        if role == "controller" and output.get("next") is None and output.get("response"):
+            # The controller supplied the final response in the same model turn.
+            break
+
         previous_node = current
         next_node = _select_next(current, last_output, definition["edges"])
         if next_node:
