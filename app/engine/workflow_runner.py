@@ -329,7 +329,8 @@ async def run_workflow(ctx, run_id: str, definition: dict) -> dict:
                 llm_started = time.perf_counter()
                 from app.services.detailed_trace import get_detailed_trace_logger
                 detailed = get_detailed_trace_logger(run_id)
-                llm_messages = [SystemMessage(content=system), HumanMessage(content=user)]
+                from app.engine import llm_utils as llm
+                llm_messages = [SystemMessage(content=system), llm.user_message(ctx, user)]
                 detailed.llm_request(role, llm_messages, workflow_node=current, attempt=attempt)
                 response = await trace.measure_async(
                     "llm_external", f"workflow_step.{current}.{role}.ainvoke",

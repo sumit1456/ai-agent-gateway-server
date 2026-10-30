@@ -22,6 +22,7 @@ router = APIRouter()
 class RunRequest(BaseModel):
     """Request model for creating a run."""
     input: Any = Field(..., description="Text or structured JSON input for the agent")
+    images: Optional[List[str]] = Field(default=None, description="Optional image URLs or image data URLs (PNG, JPEG, WEBP, GIF)")
     variables: Optional[dict] = Field(default=None, description="Optional variables to pass to the agent")
     external_session_id: Optional[str] = Field(
         default=None, min_length=1, max_length=255,
@@ -139,14 +140,35 @@ async def create_run(
     Request Body:
     {
         "input": "Your question or task here",
+        "images": ["data:image/jpeg;base64,..."],  // optional, up to 4 images
         "variables": {"key": "value"},  // optional
         "external_session_id": "conversation-123"  // optional; also accepted as X-Session-ID
     }
     """
     input = payload.input
+    images = payload.images or []
+    if isinstance(input, dict) and "text" in input and "images" in input:
+        images = images or input.get("images", [])
+        input = input.get("text", "")
+    if not isinstance(images, list) or len(images) > 4:
+        raise HTTPException(status_code=400, detail="Provide at most 4 images per run")
+    import re
+    for image in images:
+        if not isinstance(image, str) or not image.strip():
+            raise HTTPException(status_code=400, detail="Each image must be a URL or image data URL")
+        if image.startswith("data:"):
+            match = re.fullmatch(r"data:(image/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=\r\n]+)", image)
+            if not match:
+                raise HTTPException(status_code=400, detail="Image data URLs must be base64 PNG, JPEG, WEBP, or GIF")
+            if len(match.group(2)) > 7_000_000:
+                raise HTTPException(status_code=413, detail="Each image must be smaller than 5 MB")
+        elif not image.startswith(("https://", "http://")):
+            raise HTTPException(status_code=400, detail="Images must use an http(s) URL or image data URL")
     if not isinstance(input, (str, dict, list, int, float, bool)) or input is None:
         raise HTTPException(status_code=400, detail="Input must be text or a JSON value")
     input_text = input if isinstance(input, str) else json.dumps(input, ensure_ascii=False, separators=(",", ":"))
+    if images:
+        input_text = f"{input_text}\n[Attached {len(images)} image(s)]"
     variables = payload.variables
     end_user_id = x_end_user_id  # Use header value
     body_session_id = payload.external_session_id.strip() if payload.external_session_id else None
@@ -334,6 +356,7 @@ async def create_run(
         user_id=str(current_user.id),
         config_dict=config_dict,
         input_str=input,
+        images=images,
         variables=variables or {},
         agent_id=str(agent.id),
         session_id=str(session.id),

@@ -126,6 +126,7 @@ class RunContext:
     llm_factory: Callable[[str], "BaseChatModel"] # role -> chat model
     tools: "ToolRegistry"
     input: object = ""
+    images: list[str] = field(default_factory=list)
     retriever: "KnowledgeRetriever | None" = None
     kb_namespaces: list[str] = field(default_factory=list)
     conversation_summary: str = ""

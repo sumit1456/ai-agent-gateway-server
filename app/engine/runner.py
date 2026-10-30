@@ -528,6 +528,7 @@ async def run_graph(ctx: RunContext, run_id: str) -> None:
 
 async def execute_run(run_id: str, user_id: str, config_dict: dict,
                       input_str: str, variables: dict | None = None,
+                      images: list[str] | None = None,
                       agent_id: str | None = None,
                       session_id: str | None = None,
                       end_user_id: str | None = None) -> None:
@@ -549,6 +550,7 @@ async def execute_run(run_id: str, user_id: str, config_dict: dict,
         remove_detailed_trace_logger(run_id)
         raise
     ctx.input = input_str       # type: ignore[attr-defined]
+    ctx.images = images or []
     ctx.variables = variables or {}  # type: ignore[attr-defined]
     spawn(run_graph(ctx, run_id))
 

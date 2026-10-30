@@ -27,7 +27,7 @@ async def run_tool_loop(ctx, system: str, user: str, tool_names: list[str],
     log.info(f"🔧 [TOOL_LOOP] Available tools: {tool_names}")
     trace.log_custom(f"Tool loop starting - max_turns={ctx.config.limits.max_tool_turns}, tools={tool_names}")
     
-    messages = [SystemMessage(content=system), *(prior_messages or []), HumanMessage(content=user)]
+    messages = [SystemMessage(content=system), *(prior_messages or []), llm.user_message(ctx, user)]
     schemas = ctx.tools.schemas(tool_names)
     advertised_tool_names = [tool.name for tool in schemas]
     if advertised_tool_names:

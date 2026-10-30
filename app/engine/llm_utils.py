@@ -9,6 +9,15 @@ log = logging.getLogger(__name__)
 class BadOutputError(Exception):
     pass
 
+def user_message(ctx, text: str) -> HumanMessage:
+    """Build a user message, adding the run's image inputs when present."""
+    images = getattr(ctx, "images", []) or []
+    if not images:
+        return HumanMessage(content=text)
+    content = [{"type": "text", "text": text}]
+    content.extend({"type": "image_url", "image_url": {"url": image}} for image in images)
+    return HumanMessage(content=content)
+
 def extract_json(text: str) -> dict:
     """Pull the first {...} object out of free text (handles markdown code fences and chatter)."""
     start, end = text.find("{"), text.rfind("}")
@@ -32,7 +41,7 @@ async def structured_call(ctx, role: str, schema: type[BaseModel], system: str, 
     log.info(f"🎯 [LLM/{role.upper()}] Structured call for schema: {schema.__name__}")
     start_time = time.time()
     
-    messages = [SystemMessage(content=system), *(prior_messages or []), HumanMessage(content=user)]
+    messages = [SystemMessage(content=system), *(prior_messages or []), user_message(ctx, user)]
     log.info(f"📊 [LLM/{role.upper()}] System prompt: {len(system)} chars, User prompt: {len(user)} chars")
     trace.log_custom(f"Structured call - role={role}, schema={schema.__name__}")
     
@@ -78,7 +87,7 @@ async def _plain_json(ctx, role, schema, system, user, attempts, prior_messages=
     detailed = get_detailed_trace_logger(ctx.run_id)
     schema_txt = json.dumps(schema.model_json_schema())
     sys2 = f"{system}\n\nReply with ONLY a JSON object matching this JSON Schema, no other text:\n{schema_txt}"
-    messages = [SystemMessage(content=sys2), *(prior_messages or []), HumanMessage(content=user)]
+    messages = [SystemMessage(content=sys2), *(prior_messages or []), user_message(ctx, user)]
     last = ""
     for attempt in range(attempts):
         detailed.llm_request(role, messages, attempt=attempt + 1, mode="plain_json", structured_schema=schema.model_json_schema())

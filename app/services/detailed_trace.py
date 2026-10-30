@@ -16,9 +16,18 @@ DETAILED_TRACE_LOGGING = settings.detailed_trace_logging
 
 
 def _message_data(message: Any) -> dict[str, Any]:
+    content = getattr(message, "content", str(message))
+    if isinstance(content, list):
+        content = [
+            ({**part, "image_url": {"url": "[image omitted from trace]"}}
+             if isinstance(part, dict) and part.get("type") == "image_url" else
+             ({**part, "data": "[image omitted from trace]"}
+              if isinstance(part, dict) and part.get("type") == "image" and "data" in part else part))
+            for part in content
+        ]
     data = {
         "type": type(message).__name__,
-        "content": getattr(message, "content", str(message)),
+        "content": content,
     }
     for key in ("name", "tool_call_id", "tool_calls", "additional_kwargs", "response_metadata"):
         value = getattr(message, key, None)
